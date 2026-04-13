@@ -34,30 +34,38 @@ Open **http://localhost:4000**. Any changes to files under `resources/` are pick
 
 ## Releasing
 
-The repo structure mirrors the tar layout expected by `argocd-extension-installer`:
+Each extension is released as its own tar file. The structure mirrors the layout expected by `argocd-extension-installer`.
 
-```
-resources/
-  extension-Rollback.js/
-    extensions-Rollback.js
-```
-
-To create a release tar from the repo root:
+### Rollback
 
 ```bash
-tar -cf rollback.tar resources/
+tar -cf rollback.tar resources/extension-Rollback.js/
 ```
 
-Verify the structure before uploading:
+### CommitDetails
 
 ```bash
-tar -tvf rollback.tar
-# resources/
-# resources/extension-Rollback.js/
-# resources/extension-Rollback.js/extensions-Rollback.js
+tar -cf commit-details.tar resources/extension-CommitDetails.js/
 ```
 
-Upload `rollback.tar` as the release asset on GitHub, then restart the ArgoCD server deployment to pick up the new extension:
+Verify before uploading:
+
+```bash
+tar -tvf commit-details.tar
+# resources/extension-CommitDetails.js/
+# resources/extension-CommitDetails.js/extensions-CommitDetails.js
+```
+
+Upload the tar as a GitHub release asset, then add an entry to `extensionList` in `argocd.yaml`:
+
+```yaml
+- name: commit-details-extension
+  env:
+    - name: EXTENSION_URL
+      value: https://github.com/quizizz/argocd-extensions/releases/download/v{version}/commit-details.tar
+```
+
+Then restart the ArgoCD server to pick up the new extension:
 
 ```bash
 kubectl rollout restart deployment/argocd-server -n argocd
