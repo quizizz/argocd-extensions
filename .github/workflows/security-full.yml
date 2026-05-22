@@ -1,0 +1,14 @@
+name: Security Full Scan
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+jobs:
+  security:
+    uses: quizizz/launchpad/.github/workflows/shared-security-full.yml@main
+    secrets:                                   
+        PLANE_API_KEY: ${{ secrets.PLANE_API_KEY}}
+        Q_GITHUB_CI_ACCESS_TOKEN: ${{ secrets.Q_GITHUB_CI_ACCESS_TOKEN }}
