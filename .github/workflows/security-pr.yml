@@ -1,0 +1,10 @@
+name: Security PR Gate
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  security:
+    uses: quizizz/launchpad/.github/workflows/shared-security-pr.yml@main 
+    secrets:                                   
+        PLANE_API_KEY: ${{ secrets.PLANE_API_KEY}}
+        Q_GITHUB_CI_ACCESS_TOKEN: ${{ secrets.Q_GITHUB_CI_ACCESS_TOKEN }}
