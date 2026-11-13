@@ -65,6 +65,26 @@
         const cluster = key.slice(0, key.lastIndexOf('|'));
         return IN_CLUSTER.has(cluster) ? nsOfKey(key) : `${nsOfKey(key)} (${cluster})`;
     };
+    const readParams = () => new URLSearchParams(window.location.search);
+    const writeParams = updates => {
+        const params = readParams();
+        Object.entries(updates).forEach(([k, v]) => (v ? params.set(k, v) : params.delete(k)));
+        const qs = params.toString();
+        if (`?${qs}` === window.location.search || (!qs && !window.location.search)) return;
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    };
+    const clusterOfKey = key => key.slice(0, key.lastIndexOf('|'));
+    const scopeFromParams = (index, params) => {
+        const ns = params.get('namespace');
+        if (!ns) return '';
+        const cluster = params.get('cluster');
+        const keys = Object.keys(index).filter(k => k.slice(k.lastIndexOf('|') + 1) === ns);
+        return keys.find(k => (cluster ? clusterOfKey(k) === cluster : IN_CLUSTER.has(clusterOfKey(k)))) || keys[0] || '';
+    };
+    const scopeParams = key => ({
+        namespace: key ? key.slice(key.lastIndexOf('|') + 1) : '',
+        cluster: key && !IN_CLUSTER.has(clusterOfKey(key)) ? clusterOfKey(key) : ''
+    });
     const branchOf = app => (app.metadata.labels && app.metadata.labels.branch) || NO_BRANCH;
     const isAutoSync = app => !!(app.spec.syncPolicy && app.spec.syncPolicy.automated);
     const autoSyncPolicy = app => (isAutoSync(app) ? app.spec.syncPolicy.automated : null);
@@ -747,8 +767,20 @@
         const [busyBranches, setBusyBranches] = React.useState({});
 
         React.useEffect(() => {
-            listApps(null, INDEX_FIELDS).then(items => setIndex(buildIndex(items))).catch(e => setIndexError(e.message));
+            listApps(null, INDEX_FIELDS).then(items => {
+                const idx = buildIndex(items);
+                const params = readParams();
+                const scope = scopeFromParams(idx, params);
+                const br = params.get('branch');
+                setIndex(idx);
+                setScopeKey(scope);
+                setBranch(scope && br && idx[scope][br] ? br : '');
+            }).catch(e => setIndexError(e.message));
         }, []);
+
+        React.useEffect(() => {
+            if (index) writeParams({...scopeParams(scopeKey), branch});
+        }, [index, scopeKey, branch]);
 
         const counts = (index && index[scopeKey]) || {};
         const scopes = index ? Object.keys(index).sort((a, b) => nsKeyLabel(a).localeCompare(nsKeyLabel(b))) : [];
