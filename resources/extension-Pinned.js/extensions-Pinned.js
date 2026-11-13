@@ -1,5 +1,11 @@
 ((window) => {
     const h = React.createElement;
+    if (!document.getElementById('ext-theme-vars')) {
+        const themeStyle = document.createElement('style');
+        themeStyle.id = 'ext-theme-vars';
+        themeStyle.textContent = ':root{--ext-surface:#fff;--ext-surface-2:#f8fbfb;--ext-border:#eff3f5;--ext-border-strong:#dee6eb;--ext-text:#363c4a;--ext-strong:#364150;--ext-muted:#6d7f8b;--ext-selected:#e6f7fc;--ext-shadow:rgba(0,0,0,0.1);--ext-hover:rgba(0,0,0,0.08);--ext-active:rgba(0,0,0,0.15)}.theme-dark{--ext-surface:#303237;--ext-surface-2:#28292a;--ext-border:#495763;--ext-border-strong:#6d7f8b;--ext-text:#fff;--ext-strong:#dee6eb;--ext-muted:#a5b5c0;--ext-selected:#004c67;--ext-shadow:rgba(0,0,0,0.5);--ext-hover:rgba(255,255,255,0.08);--ext-active:rgba(255,255,255,0.15)}';
+        document.head.appendChild(themeStyle);
+    }
     const STORE_KEY = 'argocd-ext.pinned.v1';
     const REFRESH_MS = 30000;
     const REQUEST_TIMEOUT_MS = 20000;
@@ -69,13 +75,13 @@
         return `${Math.floor(s / 86400)}d ago`;
     }
 
-    const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
-    const fieldStyle = {height: '34px', border: '1px solid #dee6eb', borderRadius: '4px', background: '#fff', fontSize: '14px', boxSizing: 'border-box'};
-    const selectStyle = {...fieldStyle, width: '160px', padding: '0 36px 0 12px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px #fff", appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', cursor: 'pointer'};
+    const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-muted)', marginBottom: '4px'};
+    const fieldStyle = {height: '34px', border: '1px solid var(--ext-border-strong)', borderRadius: '4px', background: 'var(--ext-surface)', color: 'var(--ext-text)', fontSize: '14px', boxSizing: 'border-box'};
+    const selectStyle = {...fieldStyle, width: '160px', padding: '0 36px 0 12px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px var(--ext-surface)", color: 'var(--ext-text)', appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', cursor: 'pointer'};
     const inputStyle = {...fieldStyle, width: '360px', maxWidth: '100%', padding: '0 12px'};
-    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid #eff3f5', fontSize: '13px', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'};
-    const tableStyle = {width: '100%', minWidth: '760px', tableLayout: 'fixed', borderCollapse: 'collapse', background: '#fff'};
-    const cardStyle = {background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)', marginBottom: '16px', overflow: 'hidden'};
+    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid var(--ext-border)', fontSize: '13px', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'};
+    const tableStyle = {width: '100%', minWidth: '760px', tableLayout: 'fixed', borderCollapse: 'collapse', background: 'var(--ext-surface)', color: 'var(--ext-text)'};
+    const cardStyle = {background: 'var(--ext-surface)', color: 'var(--ext-text)', borderRadius: '4px', boxShadow: '1px 2px 3px var(--ext-shadow)', marginBottom: '16px', overflow: 'hidden'};
     const sectionTitleStyle = {...labelStyle, fontSize: '13px', margin: '24px 0 8px'};
     const iconButtonStyle = {background: 'none', border: 'none', padding: '4px 6px', cursor: 'pointer', fontSize: '14px', lineHeight: 1};
 
@@ -238,8 +244,8 @@
                     h('i', {className: loading ? 'fa fa-spinner fa-spin' : 'fa fa-redo'}), ' Refresh')
             ),
 
-            apps === null && !error && h('div', {style: {color: '#6d7f8b', marginTop: '20px'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...'),
-            apps && nothingPinned && h('div', {style: {color: '#6d7f8b', marginTop: '24px', fontSize: '14px'}}, 'Nothing pinned yet. Pin a namespace or an application above.'),
+            apps === null && !error && h('div', {style: {color: 'var(--ext-muted)', marginTop: '20px'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...'),
+            apps && nothingPinned && h('div', {style: {color: 'var(--ext-muted)', marginTop: '24px', fontSize: '14px'}}, 'Nothing pinned yet. Pin a namespace or an application above.'),
 
             apps && pins.namespaces.length > 0 && h('div', null,
                 h('div', {style: sectionTitleStyle}, 'Namespaces'),
@@ -247,10 +253,10 @@
                     const nsApps = byNs[ns] || [];
                     const collapsed = !!pins.collapsed[ns];
                     return h('div', {key: ns, style: cardStyle},
-                        h('div', {style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', cursor: 'pointer', userSelect: 'none', borderBottom: collapsed ? 'none' : '1px solid #eff3f5'}, onClick: () => toggleCollapsed(ns)},
-                            h('i', {className: `fa fa-fw fa-chevron-${collapsed ? 'right' : 'down'}`, style: {color: '#6d7f8b'}}),
+                        h('div', {style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', cursor: 'pointer', userSelect: 'none', borderBottom: collapsed ? 'none' : '1px solid var(--ext-border)'}, onClick: () => toggleCollapsed(ns)},
+                            h('i', {className: `fa fa-fw fa-chevron-${collapsed ? 'right' : 'down'}`, style: {color: 'var(--ext-muted)'}}),
                             h('strong', null, ns),
-                            h('span', {style: {color: '#6d7f8b', fontSize: '13px'}}, nsApps.length ? `${nsApps.length} app${nsApps.length === 1 ? '' : 's'}` : 'no apps found'),
+                            h('span', {style: {color: 'var(--ext-muted)', fontSize: '13px'}}, nsApps.length ? `${nsApps.length} app${nsApps.length === 1 ? '' : 's'}` : 'no apps found'),
                             summarize(nsApps).map(([label, {n, status}]) => h('span', {key: label, style: {fontSize: '12px'}}, h(Badge, {text: `${n} ${label}`, color: statusColor[status]}))),
                             h('span', {style: {marginLeft: 'auto'}, onClick: e => e.stopPropagation()},
                                 h('a', {href: `/applications?namespace=${encodeURIComponent(ns)}`, style: {fontSize: '13px', marginRight: '8px'}}, 'Open in list'),
@@ -269,7 +275,7 @@
                 h('div', {style: cardStyle}, h(AppTable, {rows: appRows, showNamespace: true, pinnedApps, onToggleApp: toggleApp}))
             ),
 
-            h('div', {style: {position: 'fixed', right: '16px', bottom: '12px', zIndex: 10, fontSize: '12px', color: '#6d7f8b', background: 'rgba(255,255,255,0.95)', border: '1px solid #eff3f5', borderRadius: '4px', padding: '4px 10px', boxShadow: '0 1px 2px rgba(0,0,0,0.08)'}},
+            h('div', {style: {position: 'fixed', right: '16px', bottom: '12px', zIndex: 10, fontSize: '12px', color: 'var(--ext-muted)', background: 'var(--ext-surface)', border: '1px solid var(--ext-border)', borderRadius: '4px', padding: '4px 10px', boxShadow: '0 1px 2px var(--ext-shadow)'}},
                 h('i', {className: 'fa fa-info-circle'}), ' Pins are stored in this browser only, not synced to other devices or users.')
         );
     };
