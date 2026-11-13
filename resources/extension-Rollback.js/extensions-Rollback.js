@@ -59,7 +59,8 @@
         const [closeActive, setCloseActive] = React.useState(false);
         const title = h('strong', null, isLatest ? 'Redeploy application' : 'Rollback application');
         const boldName = h('strong', null, appName);
-        const boldCommit = h('strong', null, fullRev(entry));
+        const meta = buildCommitCache[entry.id];
+        const boldCommit = h('strong', null, (meta && meta.commit) || fullRev(entry));
         const baseMessage = isLatest
             ? h('p', null, `Are you sure you want to redeploy application `, boldName, ` to commit `, boldCommit, '?')
             : h('p', null, `Are you sure you want to rollback application `, boldName, ` to commit `, boldCommit, '?');
