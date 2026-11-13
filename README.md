@@ -34,39 +34,14 @@ Open **http://localhost:4000**. Any changes to files under `resources/` are pick
 
 ## Releasing
 
-Each extension is released as its own tar file. The structure mirrors the layout expected by `argocd-extension-installer`.
+Merging a change under `resources/` to `main` runs [release.yml](.github/workflows/release.yml), which:
 
-### Rollback
+1. Bumps the major version (`v1.0.0` → `v2.0.0`).
+2. Packages each `resources/extension-<Name>.js/` directory as `<name>.tar` (kebab-case, e.g. `commit-details.tar`) in the layout `argocd-extension-installer` expects, and publishes them as a GitHub release.
+3. Opens a PR on `quizizz/terraform`, assigned to whoever merged, that points every `argocd.yaml` `extensionList` at the new release and adds an entry for any new extension.
 
-```bash
-tar -cf rollback.tar resources/extension-Rollback.js/
-```
+Atlantis applies that PR, and argocd-server pods restart with the new extensions. The workflow can also be run by hand from the Actions tab.
 
-### CommitDetails
+It needs a `TERRAFORM_PR_TOKEN` repo secret with contents and pull request write access on `quizizz/terraform`.
 
-```bash
-tar -cf commit-details.tar resources/extension-CommitDetails.js/
-```
-
-Verify before uploading:
-
-```bash
-tar -tvf commit-details.tar
-# resources/extension-CommitDetails.js/
-# resources/extension-CommitDetails.js/extensions-CommitDetails.js
-```
-
-Upload the tar as a GitHub release asset, then add an entry to `extensionList` in `argocd.yaml`:
-
-```yaml
-- name: commit-details-extension
-  env:
-    - name: EXTENSION_URL
-      value: https://github.com/quizizz/argocd-extensions/releases/download/v{version}/commit-details.tar
-```
-
-Then restart the ArgoCD server to pick up the new extension:
-
-```bash
-kubectl rollout restart deployment/argocd-server -n argocd
-```
+Removing an extension directory fails the terraform step until its `extensionList` entry is removed by hand.
