@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ['resources/**']
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Next version
+        id: version
+        run: |
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          major=${latest#v}
+          major=${major%%.*}
+          echo "tag=v$(( ${major:-0} + 1 )).0.0" >> "$GITHUB_OUTPUT"
+
+      - name: Package extensions
+        id: package
+        run: echo "slugs=$(.github/scripts/package.sh dist | xargs)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" dist/*.tar --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+
+      - uses: actions/checkout@v4
+        with:
+          repository: quizizz/terraform
+          token: ${{ secrets.TERRAFORM_PR_TOKEN }}
+          path: terraform
+
+      - name: Open terraform PR
+        env:
+          GH_TOKEN: ${{ secrets.TERRAFORM_PR_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SLUGS: ${{ steps.package.outputs.slugs }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          .github/scripts/update-terraform.sh "$TAG" terraform $SLUGS
+          cd terraform
+          if git diff --quiet; then
+            echo "terraform already on $TAG"
+            exit 0
+          fi
+          branch="argocd-extensions/$TAG"
+          git config user.name "$ACTOR"
+          git config user.email "$ACTOR_ID+$ACTOR@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "chore: argocd extensions $TAG"
+          git push origin "$branch"
+          url=$(gh pr create --base main --head "$branch" \
+            --title "chore: argocd extensions $TAG" \
+            --body "Bumps ArgoCD extensions to [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) in every \`argocd.yaml\` and adds an \`extensionList\` entry for any new extension. argocd-server pods restart on apply.
+
+          Triggered by @$ACTOR from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.")
+          gh pr edit "$url" --add-assignee "$ACTOR" || true
