@@ -40,6 +40,9 @@
     const appKey = app => `${app.metadata.namespace}/${app.metadata.name}`;
     const destNs = app => (app.spec && app.spec.destination && app.spec.destination.namespace) || '';
     const branchOf = app => (app.metadata.labels && app.metadata.labels.branch) || '';
+    const pageHref = (path, ns, br) => `${path}?${new URLSearchParams(br ? {namespace: ns, branch: br} : {namespace: ns})}`;
+    const bulkOpsHref = (ns, br) => pageHref('/bulk-sync', ns, br);
+    const scalingHref = (ns, br) => pageHref('/scaling', ns, br);
     const isAutoSync = app => !!(app.spec && app.spec.syncPolicy && app.spec.syncPolicy.automated);
     const syncStatus = app => app.status && app.status.sync && app.status.sync.status;
     const healthStatus = app => app.status && app.status.health && app.status.health.status;
@@ -100,12 +103,16 @@
         onClick
     }, h('i', {className: 'fa fa-thumbtack'}));
 
+    const PageLinks = ({ns, br}) => h('span', {style: {display: 'inline-flex', gap: '2px'}},
+        h('a', {href: bulkOpsHref(ns, br), title: 'Open in Bulk Sync', style: {...iconButtonStyle, color: 'var(--ext-muted)'}}, h('i', {className: 'fa fa-fw fa-layer-group'})),
+        h('a', {href: scalingHref(ns, br), title: 'Open in Scaling', style: {...iconButtonStyle, color: 'var(--ext-muted)'}}, h('i', {className: 'fa fa-fw fa-expand-arrows-alt'})));
+
     const AppTable = ({rows, showNamespace, pinnedApps, onToggleApp}) => {
         const columns = [
             {label: '', width: '40px'}, {label: 'Application', width: '32%'},
             showNamespace && {label: 'Namespace', width: '16%'},
             {label: 'Branch', width: '14%'}, {label: 'Sync', width: '110px'}, {label: 'Health', width: '120px'},
-            {label: 'Auto-sync', width: '90px'}, {label: 'Last sync', width: '110px'}
+            {label: 'Auto-sync', width: '90px'}, {label: 'Last sync', width: '110px'}, {label: '', width: '84px'}
         ].filter(Boolean);
         return h('div', {style: {overflowX: 'auto'}},
             h('table', {style: tableStyle},
@@ -113,15 +120,18 @@
                 h('thead', null, h('tr', null, columns.map((c, i) => h('th', {key: i, style: {...cellStyle, ...labelStyle, textAlign: 'left'}}, c.label)))),
                 h('tbody', null, rows.map(row => {
                     const app = row.app;
+                    const ns = app ? destNs(app) : '';
+                    const br = app ? branchOf(app) : '';
                     return h('tr', {key: row.key},
                         h('td', {style: {...cellStyle, padding: '4px 6px'}}, h(PinButton, {pinned: pinnedApps.has(row.key), label: row.name, onClick: () => onToggleApp(row.key)})),
                         h('td', {style: cellStyle, title: row.name}, app ? h('a', {href: `/applications/${app.metadata.namespace}/${app.metadata.name}`}, row.name) : row.name),
-                        showNamespace && h('td', {style: cellStyle, title: app ? destNs(app) : ''}, app ? destNs(app) || '-' : '-'),
-                        h('td', {style: cellStyle, title: app ? branchOf(app) : ''}, app ? branchOf(app) || '-' : '-'),
+                        showNamespace && h('td', {style: cellStyle, title: ns}, ns ? h('a', {href: bulkOpsHref(ns), title: `Open ${ns} in Bulk Sync`}, ns) : '-'),
+                        h('td', {style: cellStyle, title: br}, ns && br ? h('a', {href: bulkOpsHref(ns, br), title: `Open ${ns} / ${br} in Bulk Sync`}, br) : br || '-'),
                         h('td', {style: cellStyle}, h(Badge, {text: app ? syncStatus(app) : 'not found'})),
                         h('td', {style: cellStyle}, app ? h(Badge, {text: healthStatus(app)}) : ''),
                         h('td', {style: cellStyle}, app ? (isAutoSync(app) ? 'on' : 'off') : ''),
-                        h('td', {style: cellStyle, title: app && lastSync(app) ? new Date(lastSync(app)).toLocaleString() : ''}, app ? ago(lastSync(app)) : '')
+                        h('td', {style: cellStyle, title: app && lastSync(app) ? new Date(lastSync(app)).toLocaleString() : ''}, app ? ago(lastSync(app)) : ''),
+                        h('td', {style: {...cellStyle, padding: '4px 6px', textAlign: 'right'}}, ns && h(PageLinks, {ns, br}))
                     );
                 }))
             )
@@ -259,7 +269,9 @@
                             h('span', {style: {color: 'var(--ext-muted)', fontSize: '13px'}}, nsApps.length ? `${nsApps.length} app${nsApps.length === 1 ? '' : 's'}` : 'no apps found'),
                             summarize(nsApps).map(([label, {n, status}]) => h('span', {key: label, style: {fontSize: '12px'}}, h(Badge, {text: `${n} ${label}`, color: statusColor[status]}))),
                             h('span', {style: {marginLeft: 'auto'}, onClick: e => e.stopPropagation()},
-                                h('a', {href: `/applications?namespace=${encodeURIComponent(ns)}`, style: {fontSize: '13px', marginRight: '8px'}}, 'Open in list'),
+                                h('a', {href: `/applications?namespace=${encodeURIComponent(ns)}`, style: {fontSize: '13px', marginRight: '12px'}}, 'Open in list'),
+                                h('a', {href: bulkOpsHref(ns), style: {fontSize: '13px', marginRight: '12px'}}, 'Bulk Sync'),
+                                h('a', {href: scalingHref(ns), style: {fontSize: '13px', marginRight: '8px'}}, 'Scaling'),
                                 h(PinButton, {pinned: true, label: ns, onClick: () => toggleNamespace(ns)}))
                         ),
                         !collapsed && nsApps.length > 0 && h(AppTable, {
