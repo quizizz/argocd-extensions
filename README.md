@@ -8,6 +8,7 @@ Custom UI extensions for ArgoCD.
 |-----------|-------------|
 | [Rollback](resources/extension-Rollback.js/extensions-Rollback.js) | Adds a Rollback button to the application top bar with a deployment history flyout showing commit, deployer, and one-click rollback |
 | [CommitDetails](resources/extension-CommitDetails.js/extensions-CommitDetails.js) | Replaces the launchpad Author/Comment in SYNC STATUS and LAST SYNC panels with actual service commit SHA and slackUsername from _live_build.yml |
+| [Pinned](resources/extension-Pinned.js/extensions-Pinned.js) | Pinned page: pin namespaces or individual apps for a quick view of their sync, health, branch, auto-sync and last sync. Pins are stored in browser localStorage only |
 
 ---
 
@@ -46,6 +47,12 @@ tar -cf rollback.tar resources/extension-Rollback.js/
 
 ```bash
 tar -cf commit-details.tar resources/extension-CommitDetails.js/
+```
+
+### Pinned
+
+```bash
+tar -cf pinned.tar resources/extension-Pinned.js/
 ```
 
 Verify before uploading:
