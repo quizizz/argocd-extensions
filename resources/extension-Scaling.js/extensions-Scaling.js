@@ -418,6 +418,26 @@
         const [cluster, ns] = [key.slice(0, key.lastIndexOf('|')), key.slice(key.lastIndexOf('|') + 1)];
         return IN_CLUSTER.has(cluster) ? ns : `${ns} (${cluster})`;
     };
+    const readParams = () => new URLSearchParams(window.location.search);
+    const writeParams = updates => {
+        const params = readParams();
+        Object.entries(updates).forEach(([k, v]) => (v ? params.set(k, v) : params.delete(k)));
+        const qs = params.toString();
+        if (`?${qs}` === window.location.search || (!qs && !window.location.search)) return;
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    };
+    const clusterOfKey = key => key.slice(0, key.lastIndexOf('|'));
+    const scopeFromParams = (index, params) => {
+        const ns = params.get('namespace');
+        if (!ns) return '';
+        const cluster = params.get('cluster');
+        const keys = Object.keys(index).filter(k => k.slice(k.lastIndexOf('|') + 1) === ns);
+        return keys.find(k => (cluster ? clusterOfKey(k) === cluster : IN_CLUSTER.has(clusterOfKey(k)))) || keys[0] || '';
+    };
+    const scopeParams = key => ({
+        namespace: key ? key.slice(key.lastIndexOf('|') + 1) : '',
+        cluster: key && !IN_CLUSTER.has(clusterOfKey(key)) ? clusterOfKey(key) : ''
+    });
     const appKey = app => `${app.metadata.namespace}/${app.metadata.name}`;
     const NO_SCALING = {kind: 'none', namespace: '', name: '', target: '', state: 'none', min: null, max: null, current: null, desired: null, triggers: [], crons: [], issues: [], hpaName: null};
     const ratio = s => (s && s.state !== 'fixed' && s.max && s.current !== null ? s.current / s.max : -1);
@@ -466,9 +486,19 @@
                     const br = branchOf(a) || '-';
                     idx[key][br] = (idx[key][br] || 0) + 1;
                 });
+                const params = readParams();
+                const scope = scopeFromParams(idx, params);
+                const br = params.get('branch');
                 setIndex(idx);
+                setNamespace(scope);
+                setBranch(scope && br && br !== '-' && idx[scope][br] ? br : ALL_BRANCHES);
+                setOnlyCapped(!!scope && params.get('capped') === '1');
             }).catch(e => setIndexError(e.message));
         }, []);
+
+        React.useEffect(() => {
+            if (index) writeParams({...scopeParams(namespace), branch: branch === ALL_BRANCHES ? '' : branch, capped: onlyCapped ? '1' : ''});
+        }, [index, namespace, branch, onlyCapped]);
 
         const load = async (key, br) => {
             const id = ++loadId.current;
