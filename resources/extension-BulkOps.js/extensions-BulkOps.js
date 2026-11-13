@@ -33,6 +33,21 @@
     const isAutoSync = app => !!(app.spec.syncPolicy && app.spec.syncPolicy.automated);
     const historyOf = app => (app.status && app.status.history) || [];
     const shortSha = sha => (sha ? sha.slice(0, 10) : '');
+    const fmtTime = t => (t ? new Date(t).toLocaleString() : '');
+    const configRepo = entry => {
+        const {sources} = entrySources(entry);
+        const s = sources.find(x => x && x.repoURL);
+        return s ? s.repoURL.replace(/\.git$/, '') : '';
+    };
+    const configRevision = entry => entrySources(entry).revisions.find(Boolean) || '';
+    const initiator = entry => {
+        const by = entry.initiatedBy || {};
+        return by.username || (by.automated ? 'auto-sync' : '');
+    };
+    const githubCommitSearch = (repoURL, sha) => {
+        const m = /github\.com[/:]([^/]+)\//.exec(repoURL || '');
+        return m ? `https://github.com/search?q=${encodeURIComponent(`org:${m[1]} ${sha}`)}&type=commits` : '';
+    };
 
     async function listApps(selector, fields) {
         const params = new URLSearchParams();
@@ -72,7 +87,8 @@
                 const params = (data.helm && data.helm.parameters) || [];
                 const commit = params.find(p => p.name === 'build.commit');
                 const slack = params.find(p => p.name === 'build.slackUsername');
-                if (commit) result = {commit: commit.value, slackUsername: slack ? slack.value : null};
+                const time = params.find(p => p.name === 'build.commitTime');
+                if (commit) result = {commit: commit.value, slackUsername: slack ? slack.value : null, commitTime: time && Number(time.value) ? Number(time.value) * 1000 : null};
             } catch (_) {}
         }
         buildCommitCache[key] = result;
@@ -98,9 +114,15 @@
             historyOf(app).forEach(entry => {
                 const meta = metas[entry.id];
                 if (!meta) return;
-                const t = byCommit[meta.commit] || {commit: meta.commit, slackUsername: meta.slackUsername, deployedAt: entry.deployedAt, apps: new Set()};
-                if (entry.deployedAt && (!t.deployedAt || entry.deployedAt > t.deployedAt)) t.deployedAt = entry.deployedAt;
+                const t = byCommit[meta.commit] || {commit: meta.commit, slackUsername: meta.slackUsername, commitTime: meta.commitTime, apps: new Set(), current: new Set()};
+                if (!t.deployedAt || (entry.deployedAt || '') > t.deployedAt) {
+                    t.deployedAt = entry.deployedAt || t.deployedAt;
+                    t.initiatedBy = initiator(entry);
+                    t.configRepo = configRepo(entry);
+                    t.configRevision = configRevision(entry);
+                }
                 t.apps.add(app.metadata.name);
+                if (currentCommit(app, histories) === meta.commit) t.current.add(app.metadata.name);
                 byCommit[meta.commit] = t;
             });
         });
@@ -199,13 +221,25 @@
     }
 
     const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
-    const selectStyle = {minWidth: '240px', height: '34px', padding: '0 8px', border: '1px solid #dee6eb', borderRadius: '4px', background: '#fff', fontSize: '14px'};
-    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid #eff3f5', fontSize: '13px', verticalAlign: 'middle'};
+    const selectStyle = {width: '240px', maxWidth: '100%', height: '34px', padding: '0 36px 0 12px', border: '1px solid #dee6eb', borderRadius: '4px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px #fff", appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', fontSize: '14px', cursor: 'pointer'};
+    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid #eff3f5', fontSize: '13px', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'};
+    const tableStyle = {width: '100%', minWidth: '820px', tableLayout: 'fixed', borderCollapse: 'collapse', background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)'};
+    const buttonStyle = {whiteSpace: 'nowrap', flexShrink: 0};
+    const sectionTitleStyle = {...labelStyle, fontSize: '13px', margin: '28px 0 8px'};
+    const linkProps = href => ({href, target: '_blank', rel: 'noopener noreferrer'});
+
+    const Table = ({columns, children}) => h('div', {style: {overflowX: 'auto'}},
+        h('table', {style: tableStyle},
+            h('colgroup', null, columns.map(c => h('col', {key: c.label, style: {width: c.width}}))),
+            h('thead', null, h('tr', null, columns.map(c => h('th', {key: c.label, style: {...cellStyle, ...labelStyle, textAlign: 'left'}}, c.label)))),
+            h('tbody', null, children)
+        )
+    );
 
     const statusColor = {
         Synced: '#18be94', OutOfSync: '#f4c030', Healthy: '#18be94', Progressing: '#0dadea',
         Degraded: '#e96d76', Missing: '#f4c030', Suspended: '#766f94', Unknown: '#ccd6dd',
-        ok: '#18be94', error: '#e96d76', running: '#0dadea', skipped: '#6d7f8b'
+        ok: '#18be94', current: '#0dadea', error: '#e96d76', running: '#0dadea', skipped: '#6d7f8b'
     };
 
     const Badge = ({text}) => h('span', {
@@ -370,76 +404,107 @@
         const namespaces = index ? Object.keys(index).sort() : [];
         const branches = index && namespace ? Object.keys(index[namespace] || {}).sort() : [];
 
-        return h('div', {style: {padding: '24px', maxWidth: '1400px'}},
+        return h('div', {style: {padding: '24px 16px', maxWidth: '1400px', boxSizing: 'border-box'}},
             confirm && h(ConfirmModal, {
                 title: confirm.title, lines: confirm.lines, apps: confirm.apps, requireText: confirm.requireText,
                 onCancel: () => setConfirm(null),
                 onConfirm: () => { const run = confirm.run; setConfirm(null); run(); }
             }),
             indexError && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, indexError),
-            h('div', {style: {display: 'flex', gap: '24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
-                h('div', null,
+            h('div', {style: {display: 'flex', gap: '16px 24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
+                h('div', {style: {maxWidth: '100%'}},
                     h('div', {style: labelStyle}, 'Namespace'),
                     h('select', {style: selectStyle, value: namespace, disabled: !index || busy, onChange: e => { setNamespace(e.target.value); setBranch(''); }},
                         h('option', {value: ''}, index ? 'Select namespace' : 'Loading...'),
                         namespaces.map(ns => h('option', {key: ns, value: ns}, ns))
                     )
                 ),
-                h('div', null,
+                h('div', {style: {maxWidth: '100%'}},
                     h('div', {style: labelStyle}, 'Branch'),
                     h('select', {style: selectStyle, value: branch, disabled: !namespace || busy, onChange: e => setBranch(e.target.value)},
                         h('option', {value: ''}, 'Select branch'),
                         branches.map(br => h('option', {key: br, value: br}, `${br} (${index[namespace][br]})`))
                     )
                 ),
-                h('button', {className: 'argo-button argo-button--base-o', disabled: !branch || loading || busy, onClick: () => loadApps(namespace, branch, true)},
+                h('button', {className: 'argo-button argo-button--base-o', style: buttonStyle, disabled: !branch || loading || busy, onClick: () => loadApps(namespace, branch, true)},
                     h('i', {className: 'fa fa-redo'}), ' Refresh')
             ),
 
-            branch && h('div', {style: {display: 'flex', gap: '32px', marginBottom: '20px', flexWrap: 'wrap', alignItems: 'flex-end'}},
+            branch && h('div', {style: {display: 'flex', gap: '12px 24px', marginBottom: '20px', flexWrap: 'wrap', alignItems: 'center'}},
                 h('div', {style: {display: 'flex', gap: '12px', alignItems: 'center'}},
-                    h('button', {className: 'argo-button argo-button--base', disabled: busy || loading || apps.length === 0, onClick: onSyncAll},
+                    h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || loading || apps.length === 0, onClick: onSyncAll},
                         h('i', {className: 'fa fa-sync'}), ' Sync all'),
-                    h('label', {style: {fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px'}},
-                        h('input', {type: 'checkbox', checked: enableAutoSync, onChange: e => setEnableAutoSync(e.target.checked)}),
+                    h('label', {style: {fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap', margin: 0}},
+                        h('input', {type: 'checkbox', checked: enableAutoSync, onChange: e => setEnableAutoSync(e.target.checked), style: {margin: 0}}),
                         'Re-enable auto-sync')
                 ),
-                h('button', {className: 'argo-button argo-button--base', disabled: busy || loading || apps.length === 0, onClick: onRestartAll},
+                h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || loading || apps.length === 0, onClick: onRestartAll},
                     h('i', {className: 'fa fa-redo-alt'}), ' Restart all'),
-                h('div', {style: {display: 'flex', gap: '12px', alignItems: 'center'}},
-                    h('select', {style: {...selectStyle, minWidth: '360px'}, value: targetCommit, disabled: busy || resolving || targets.length === 0, onChange: e => setTargetCommit(e.target.value)},
-                        h('option', {value: ''}, resolving ? 'Resolving build commits...' : 'Select build commit to roll back to'),
-                        targets.map(t => h('option', {key: t.commit, value: t.commit},
-                            `${shortSha(t.commit)}  ${t.slackUsername || ''}  ${t.deployedAt ? new Date(t.deployedAt).toLocaleString() : ''}  (${t.apps.size}/${apps.length} apps)`))
-                    ),
-                    h('button', {className: 'argo-button argo-button--base', disabled: busy || !targetCommit, onClick: onRollbackAll},
-                        h('i', {className: 'fa fa-step-backward'}), ' Rollback all')
-                )
+                h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || !targetCommit, onClick: onRollbackAll, title: targetCommit ? '' : 'Select a build in Rollback history below'},
+                    h('i', {className: 'fa fa-step-backward'}), targetCommit ? ` Rollback all to ${shortSha(targetCommit)}` : ' Rollback all')
             ),
 
             loading && apps.length === 0
                 ? h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...')
-                : apps.length > 0 && h('table', {style: {width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)'}},
-                    h('thead', null, h('tr', null,
-                        ['Application', 'Sync', 'Health', 'Auto-sync', 'Build commit', 'Result'].map(c =>
-                            h('th', {key: c, style: {...cellStyle, ...labelStyle, textAlign: 'left'}}, c))
-                    )),
-                    h('tbody', null, apps.map(app => {
-                        const name = app.metadata.name;
-                        const res = results[name];
-                        const cur = currentCommit(app, histories);
-                        return h('tr', {key: name},
-                            h('td', {style: cellStyle}, h('a', {href: `/applications/${app.metadata.namespace}/${name}`}, name)),
-                            h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
-                            h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
-                            h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
-                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}}, resolving ? '...' : shortSha(cur) || '-'),
-                            h('td', {style: cellStyle}, res ? h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : '') : '')
+                : apps.length > 0 && h(Table, {columns: [
+                    {label: 'Application', width: '30%'}, {label: 'Sync', width: '110px'}, {label: 'Health', width: '120px'},
+                    {label: 'Auto-sync', width: '90px'}, {label: 'Build commit', width: '120px'}, {label: 'Result', width: '30%'}
+                ]}, apps.map(app => {
+                    const name = app.metadata.name;
+                    const res = results[name];
+                    const cur = currentCommit(app, histories);
+                    return h('tr', {key: name},
+                        h('td', {style: cellStyle, title: name}, h('a', {href: `/applications/${app.metadata.namespace}/${name}`}, name)),
+                        h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
+                        h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
+                        h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
+                        h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
+                        h('td', {style: cellStyle, title: res && res.message ? res.message : ''}, res ? h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : '') : '')
+                    );
+                })),
+
+            branch && apps.length > 0 && h('div', null,
+                h('div', {style: sectionTitleStyle}, 'Rollback history', resolving && h('span', {style: {textTransform: 'none', fontWeight: 400, marginLeft: '8px'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' resolving build commits...')),
+                !resolving && targets.length === 0
+                    ? h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'No build commits found in app history.')
+                    : h(Table, {columns: [
+                        {label: '', width: '36px'}, {label: 'Build commit', width: '130px'}, {label: 'Built by', width: '120px'},
+                        {label: 'Committed', width: '170px'}, {label: 'Last deployed', width: '170px'}, {label: 'Deployed by', width: '140px'},
+                        {label: 'Launchpad commit', width: '140px'}, {label: 'Apps', width: '120px'}
+                    ]}, targets.map(t => {
+                        const selected = targetCommit === t.commit;
+                        const isCurrent = t.current.size === apps.length;
+                        const search = githubCommitSearch(t.configRepo, t.commit);
+                        const pick = () => !busy && setTargetCommit(selected ? '' : t.commit);
+                        return h('tr', {key: t.commit, onClick: pick, style: {cursor: busy ? 'default' : 'pointer', background: selected ? '#e6f7fc' : undefined}},
+                            h('td', {style: cellStyle}, h('input', {type: 'radio', checked: selected, disabled: busy, onChange: pick, onClick: e => e.stopPropagation(), style: {margin: 0}})),
+                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: t.commit},
+                                search ? h('a', {...linkProps(search), onClick: e => e.stopPropagation()}, shortSha(t.commit)) : shortSha(t.commit),
+                                isCurrent && h('span', {style: {marginLeft: '6px', fontFamily: 'inherit'}}, h(Badge, {text: 'current'}))),
+                            h('td', {style: cellStyle}, t.slackUsername || '-'),
+                            h('td', {style: cellStyle}, fmtTime(t.commitTime) || '-'),
+                            h('td', {style: cellStyle}, fmtTime(t.deployedAt) || '-'),
+                            h('td', {style: cellStyle}, t.initiatedBy || '-'),
+                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: t.configRevision || ''},
+                                t.configRevision && t.configRepo
+                                    ? h('a', {...linkProps(`${t.configRepo}/commit/${t.configRevision}`), onClick: e => e.stopPropagation()}, shortSha(t.configRevision))
+                                    : shortSha(t.configRevision) || '-'),
+                            h('td', {style: cellStyle, title: Array.from(t.apps).join('\n')}, `${t.apps.size}/${apps.length}${t.current.size && !isCurrent ? ` (${t.current.size} current)` : ''}`)
                         );
                     }))
-                )
+            )
         );
     };
 
-    window.extensionsAPI.registerSystemLevelExtension(BulkOpsPage, 'Bulk Ops', '/bulk-ops', 'fa-layer-group');
+    const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(BulkOpsPage, 'Bulk Ops', '/bulk-ops', 'fa-layer-group fa-fw');
+    const appRoot = document.getElementById('app');
+    if (!appRoot || appRoot.childElementCount) {
+        registerPage();
+    } else {
+        new MutationObserver((_, observer) => {
+            if (!appRoot.childElementCount) return;
+            observer.disconnect();
+            registerPage();
+        }).observe(appRoot, {childList: true});
+    }
 })(window);
