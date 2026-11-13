@@ -2,18 +2,28 @@
     const h = React.createElement;
     const STORE_KEY = 'argocd-ext.pinned.v1';
     const REFRESH_MS = 30000;
+    const REQUEST_TIMEOUT_MS = 20000;
     const APP_FIELDS = [
         'items.metadata.name', 'items.metadata.namespace', 'items.metadata.labels', 'items.spec.destination', 'items.spec.syncPolicy',
         'items.status.sync.status', 'items.status.health', 'items.status.operationState.phase', 'items.status.operationState.finishedAt'
     ];
 
     async function apiRequest(method, path) {
-        const resp = await fetch(path, {method, headers: {'Content-Type': 'application/json'}});
-        if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error(data.message || `Request failed: ${resp.status} ${resp.statusText}`);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        try {
+            const resp = await fetch(path, {method, headers: {'Content-Type': 'application/json'}, signal: controller.signal});
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.message || `Request failed: ${resp.status} ${resp.statusText}`);
+            }
+            return await resp.json().catch(() => ({}));
+        } catch (e) {
+            if (e.name === 'AbortError') throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+            throw e;
+        } finally {
+            clearTimeout(timer);
         }
-        return resp.json().catch(() => ({}));
     }
 
     async function listApps() {
@@ -114,11 +124,12 @@
 
     const summarize = apps => {
         const counts = {};
+        const bump = (label, status) => { counts[label] = counts[label] || {n: 0, status}; counts[label].n++; };
         apps.forEach(a => {
-            const s = syncStatus(a);
-            const hs = healthStatus(a);
-            if (s && s !== 'Synced') counts[s] = (counts[s] || 0) + 1;
-            if (hs && hs !== 'Healthy') counts[hs] = (counts[hs] || 0) + 1;
+            const s = syncStatus(a) || 'Unknown';
+            const hs = healthStatus(a) || 'Unknown';
+            if (s !== 'Synced') bump(s === 'Unknown' ? 'sync Unknown' : s, s);
+            if (hs !== 'Healthy') bump(hs === 'Unknown' ? 'health Unknown' : hs, hs);
         });
         return Object.entries(counts);
     };
@@ -127,32 +138,40 @@
         const [pins, setPins] = React.useState(readPins);
         const [apps, setApps] = React.useState(null);
         const [error, setError] = React.useState(null);
+        const [loadedAt, setLoadedAt] = React.useState(null);
         const [loading, setLoading] = React.useState(false);
         const [kind, setKind] = React.useState('namespace');
         const [query, setQuery] = React.useState('');
         const loadId = React.useRef(0);
+        const inFlight = React.useRef(false);
 
         const load = async () => {
             const id = ++loadId.current;
+            inFlight.current = true;
             setLoading(true);
             try {
                 const items = await listApps();
                 if (id !== loadId.current) return;
                 setApps(items.sort((a, b) => branchOf(a).localeCompare(branchOf(b)) || a.metadata.name.localeCompare(b.metadata.name)));
+                setLoadedAt(new Date().toISOString());
                 setError(null);
             } catch (e) {
                 if (id === loadId.current) setError(e.message);
             } finally {
-                if (id === loadId.current) setLoading(false);
+                if (id === loadId.current) {
+                    inFlight.current = false;
+                    setLoading(false);
+                }
             }
         };
 
         React.useEffect(() => {
             load();
-            const timer = setInterval(load, REFRESH_MS);
+            const timer = setInterval(() => { if (!inFlight.current) load(); }, REFRESH_MS);
             const onStorage = e => { if (e.key === STORE_KEY) setPins(readPins()); };
             window.addEventListener('storage', onStorage);
             return () => {
+                loadId.current++;
                 clearInterval(timer);
                 window.removeEventListener('storage', onStorage);
             };
@@ -193,7 +212,8 @@
         const nothingPinned = pins.apps.length === 0 && pins.namespaces.length === 0;
 
         return h('div', {style: {padding: '24px 16px 56px', maxWidth: '1400px', boxSizing: 'border-box'}},
-            error && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, error),
+            error && h('div', {style: {color: '#e96d76', marginBottom: '12px'}},
+                apps ? `Refresh failed, showing data from ${ago(loadedAt)}: ${error}` : error),
             h('div', {style: {display: 'flex', gap: '12px', alignItems: 'flex-end', flexWrap: 'wrap'}},
                 h('div', null,
                     h('div', {style: labelStyle}, 'Pin a'),
@@ -231,7 +251,7 @@
                             h('i', {className: `fa fa-fw fa-chevron-${collapsed ? 'right' : 'down'}`, style: {color: '#6d7f8b'}}),
                             h('strong', null, ns),
                             h('span', {style: {color: '#6d7f8b', fontSize: '13px'}}, nsApps.length ? `${nsApps.length} app${nsApps.length === 1 ? '' : 's'}` : 'no apps found'),
-                            summarize(nsApps).map(([status, n]) => h('span', {key: status, style: {fontSize: '12px'}}, h(Badge, {text: `${n} ${status}`, color: statusColor[status]}))),
+                            summarize(nsApps).map(([label, {n, status}]) => h('span', {key: label, style: {fontSize: '12px'}}, h(Badge, {text: `${n} ${label}`, color: statusColor[status]}))),
                             h('span', {style: {marginLeft: 'auto'}, onClick: e => e.stopPropagation()},
                                 h('a', {href: `/applications?namespace=${encodeURIComponent(ns)}`, style: {fontSize: '13px', marginRight: '8px'}}, 'Open in list'),
                                 h(PinButton, {pinned: true, label: ns, onClick: () => toggleNamespace(ns)}))
@@ -255,6 +275,9 @@
     };
 
     const describeSidebarItem = (title, description) => {
+        const registry = window.extSidebarDescriptions || (window.extSidebarDescriptions = {items: {}, observer: null});
+        registry.items[title] = description;
+        if (registry.observer) return;
         if (!document.getElementById('ext-nav-icon-style')) {
             const style = document.createElement('style');
             style.id = 'ext-nav-icon-style';
@@ -262,18 +285,20 @@
             document.head.appendChild(style);
         }
         const attach = el => {
-            if (el.dataset.extDescription || el.textContent !== title) return;
+            const text = registry.items[el.textContent];
+            if (el.dataset.extDescription || !text) return;
             el.dataset.extDescription = '1';
             const d = document.createElement('div');
-            d.textContent = description;
+            d.textContent = text;
             d.style.cssText = 'font-size:12px;font-weight:400;opacity:0.8;margin-top:4px;max-width:240px;white-space:normal;line-height:1.4';
             el.appendChild(d);
         };
-        new MutationObserver(mutations => mutations.forEach(m => m.addedNodes.forEach(n => {
+        registry.observer = new MutationObserver(mutations => mutations.forEach(m => m.addedNodes.forEach(n => {
             if (n.nodeType !== 1) return;
             if (n.classList.contains('sidebar__tooltip')) attach(n);
             else if (n.matches('[data-tippy-root], .tippy-popper')) n.querySelectorAll('.sidebar__tooltip').forEach(attach);
-        }))).observe(document.body, {childList: true, subtree: true});
+        })));
+        registry.observer.observe(document.body, {childList: true, subtree: true});
     };
 
     const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(PinnedPage, 'Pinned', '/pinned', 'fa-thumbtack fa-fw ext-nav-icon');
