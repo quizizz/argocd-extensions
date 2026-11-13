@@ -1,7 +1,21 @@
 ((window) => {
     const h = React.createElement;
     const CONCURRENCY = 5;
-    const FALLBACK_AUTO_SYNC_POLICY = {prune: false};
+    const NO_BRANCH = '__none__';
+    const OP_POLL_MS = 3000;
+    const OP_TIMEOUT_MS = 10 * 60 * 1000;
+    const SECTION_FIELDS = [
+        'items.metadata.name', 'items.metadata.namespace', 'items.metadata.labels', 'items.metadata.ownerReferences',
+        'items.spec', 'items.status.sync.status', 'items.status.health.status', 'items.status.history', 'items.status.operationState'
+    ];
+    const OPERATION_FIELDS = ['items.metadata.name', 'items.metadata.namespace', 'items.metadata.labels', 'items.status.operationState'];
+    const INDEX_FIELDS = ['items.metadata.name', 'items.metadata.labels', 'items.spec.destination'];
+    const SYNC_POLICY_POINTERS = new Set(['/spec', '/spec/syncPolicy', '/spec/syncPolicy/automated']);
+    const SYNC_POLICY_JQ = new Set(['.spec', '.spec.syncPolicy', '.spec.syncPolicy.automated']);
+    const APPSET_NO_UPDATE = new Set(['create-only', 'create-delete']);
+    const IN_CLUSTER = new Set(['', 'in-cluster', 'https://kubernetes.default.svc']);
+    const RESTARTABLE = new Set(['apps/Deployment', 'apps/StatefulSet', 'apps/DaemonSet', 'argoproj.io/Rollout']);
+    const REVERTED_BY_APPSET = 'auto-sync re-enabled by ApplicationSet; rollback will be reverted';
 
     async function apiRequest(method, path, body) {
         const resp = await fetch(path, {
@@ -11,7 +25,10 @@
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
-            throw new Error(data.message || `Request failed: ${resp.status} ${resp.statusText}`);
+            const err = new Error(data.message || `Request failed: ${resp.status} ${resp.statusText}`);
+            err.status = resp.status;
+            err.serverMessage = data.message || '';
+            throw err;
         }
         return resp.json().catch(() => ({}));
     }
@@ -28,15 +45,31 @@
     }
 
     const appPath = name => `/api/v1/applications/${encodeURIComponent(name)}`;
+    const nsQuery = app => `appNamespace=${encodeURIComponent(app.metadata.namespace)}`;
+    const appKey = app => `${app.metadata.namespace}/${app.metadata.name}`;
+    const branchLabel = branch => (branch === NO_BRANCH ? '(no branch)' : branch);
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
     const destNs = app => (app.spec && app.spec.destination && app.spec.destination.namespace) || '';
-    const branchOf = app => (app.metadata.labels && app.metadata.labels.branch) || '';
+    const destCluster = app => {
+        const d = (app.spec && app.spec.destination) || {};
+        return d.name || d.server || '';
+    };
+    const nsKey = app => `${destCluster(app)}|${destNs(app)}`;
+    const nsOfKey = key => key.slice(key.lastIndexOf('|') + 1);
+    const nsKeyLabel = key => {
+        const cluster = key.slice(0, key.lastIndexOf('|'));
+        return IN_CLUSTER.has(cluster) ? nsOfKey(key) : `${nsOfKey(key)} (${cluster})`;
+    };
+    const branchOf = app => (app.metadata.labels && app.metadata.labels.branch) || NO_BRANCH;
     const isAutoSync = app => !!(app.spec.syncPolicy && app.spec.syncPolicy.automated);
+    const autoSyncPolicy = app => (isAutoSync(app) ? app.spec.syncPolicy.automated : null);
     const historyOf = app => (app.status && app.status.history) || [];
+    const latestEntry = app => historyOf(app).reduce((a, b) => (!a || b.id > a.id ? b : a), null);
+    const operationStart = app => (app.status && app.status.operationState && app.status.operationState.startedAt) || '';
     const shortSha = sha => (sha ? sha.slice(0, 10) : '');
     const fmtTime = t => (t ? new Date(t).toLocaleString() : '');
     const configRepo = entry => {
-        const {sources} = entrySources(entry);
-        const s = sources.find(x => x && x.repoURL);
+        const s = entrySources(entry).sources.find(x => x && x.repoURL);
         return s ? s.repoURL.replace(/\.git$/, '') : '';
     };
     const configRevision = entry => entrySources(entry).revisions.find(Boolean) || '';
@@ -58,6 +91,9 @@
         return data.items || [];
     }
 
+    const listBranchApps = async (branch, fields) =>
+        (await listApps(branch === NO_BRANCH ? null : `branch=${branch}`, fields)).filter(a => branchOf(a) === branch);
+
     const buildCommitCache = {};
 
     function entrySources(entry) {
@@ -70,9 +106,10 @@
 
     async function resolveBuildCommit(app, entry) {
         const {sources, revisions} = entrySources(entry);
-        const key = `${app.metadata.name}|${revisions.join(',')}`;
+        const key = `${appKey(app)}|${revisions.join(',')}`;
         if (buildCommitCache[key] !== undefined) return buildCommitCache[key];
         let result = null;
+        let failure = null;
         for (let i = 0; i < sources.length && !result; i++) {
             const source = sources[i];
             if (!source || !source.repoURL) continue;
@@ -85,34 +122,58 @@
                     versionId: entry.id
                 });
                 const params = (data.helm && data.helm.parameters) || [];
-                const commit = params.find(p => p.name === 'build.commit');
-                const slack = params.find(p => p.name === 'build.slackUsername');
-                const time = params.find(p => p.name === 'build.commitTime');
+                const param = name => params.find(p => p.name === name);
+                const commit = param('build.commit');
+                const slack = param('build.slackUsername');
+                const time = param('build.commitTime');
                 if (commit) result = {commit: commit.value, slackUsername: slack ? slack.value : null, commitTime: time && Number(time.value) ? Number(time.value) * 1000 : null};
-            } catch (_) {}
+            } catch (e) {
+                failure = e;
+            }
         }
+        if (!result && failure) throw failure;
         buildCommitCache[key] = result;
         return result;
     }
 
     async function resolveAppHistories(apps) {
-        const tasks = [];
-        apps.forEach(app => historyOf(app).forEach(entry => tasks.push({app, entry})));
         const out = {};
+        const tasks = [];
+        apps.forEach(app => {
+            out[appKey(app)] = {byId: {}, failed: false};
+            historyOf(app).forEach(entry => tasks.push({app, entry}));
+        });
         await runPool(tasks, async ({app, entry}) => {
-            const meta = await resolveBuildCommit(app, entry);
-            out[app.metadata.name] = out[app.metadata.name] || {};
-            out[app.metadata.name][entry.id] = meta;
+            const record = out[appKey(app)];
+            try {
+                record.byId[entry.id] = await resolveBuildCommit(app, entry);
+            } catch (_) {
+                record.failed = true;
+            }
         });
         return out;
+    }
+
+    const historyRecord = (histories, app) => histories[appKey(app)] || {byId: {}, failed: false};
+    const buildMeta = (histories, app, entry) => (entry ? historyRecord(histories, app).byId[entry.id] : null);
+
+    function currentCommit(app, histories) {
+        const meta = buildMeta(histories, app, latestEntry(app));
+        return meta ? meta.commit : null;
+    }
+
+    function findEntryForCommit(app, histories, commit) {
+        return historyOf(app)
+            .filter(e => (buildMeta(histories, app, e) || {}).commit === commit)
+            .reduce((a, b) => (!a || b.id > a.id ? b : a), null);
     }
 
     function rollbackTargets(apps, histories) {
         const byCommit = {};
         apps.forEach(app => {
-            const metas = histories[app.metadata.name] || {};
+            const current = currentCommit(app, histories);
             historyOf(app).forEach(entry => {
-                const meta = metas[entry.id];
+                const meta = buildMeta(histories, app, entry);
                 if (!meta) return;
                 const t = byCommit[meta.commit] || {commit: meta.commit, slackUsername: meta.slackUsername, commitTime: meta.commitTime, apps: new Set(), current: new Set()};
                 if (!t.deployedAt || (entry.deployedAt || '') > t.deployedAt) {
@@ -121,70 +182,122 @@
                     t.configRepo = configRepo(entry);
                     t.configRevision = configRevision(entry);
                 }
-                t.apps.add(app.metadata.name);
-                if (currentCommit(app, histories) === meta.commit) t.current.add(app.metadata.name);
+                t.apps.add(appKey(app));
+                if (current === meta.commit) t.current.add(appKey(app));
                 byCommit[meta.commit] = t;
             });
         });
         return Object.values(byCommit).sort((a, b) => (b.deployedAt || '').localeCompare(a.deployedAt || ''));
     }
 
-    function findEntryForCommit(app, histories, commit) {
-        const metas = histories[app.metadata.name] || {};
-        const matches = historyOf(app).filter(e => metas[e.id] && metas[e.id].commit === commit);
-        if (matches.length === 0) return null;
-        return matches.reduce((a, b) => (b.id > a.id ? b : a));
+    function planRollback(apps, histories, targetCommit) {
+        const plan = [];
+        const skipped = [];
+        apps.forEach(app => {
+            const entry = findEntryForCommit(app, histories, targetCommit);
+            if (historyRecord(histories, app).failed) skipped.push({app, reason: 'could not resolve all build commits, retry'});
+            else if (!entry) skipped.push({app, reason: 'commit not in history'});
+            else if (currentCommit(app, histories) === targetCommit) skipped.push({app, reason: 'already on commit'});
+            else plan.push({app, entryId: entry.id});
+        });
+        return {plan, skipped};
     }
 
-    function currentCommit(app, histories) {
-        const hist = historyOf(app);
-        if (hist.length === 0) return null;
-        const latest = hist.reduce((a, b) => (b.id > a.id ? b : a));
-        const meta = (histories[app.metadata.name] || {})[latest.id];
-        return meta ? meta.commit : null;
+    const appSetOwner = app => (app.metadata.ownerReferences || []).find(o => o.kind === 'ApplicationSet');
+
+    const ignoresSyncPolicy = (set, appName) => ((set.spec && set.spec.ignoreApplicationDifferences) || []).some(rule =>
+        (!rule.name || rule.name === appName) && (
+            (rule.jsonPointers || []).some(p => SYNC_POLICY_POINTERS.has(p)) ||
+            (rule.jqPathExpressions || []).some(p => SYNC_POLICY_JQ.has(p.trim()))
+        ));
+
+    function appSetPolicyLookup() {
+        const sets = {};
+        return async app => {
+            const owner = appSetOwner(app);
+            if (!owner) return {automated: null, reenablesAutoSync: false};
+            const key = `${app.metadata.namespace}/${owner.name}`;
+            sets[key] = sets[key] || apiRequest('GET', `/api/v1/applicationsets/${encodeURIComponent(owner.name)}?appsetNamespace=${encodeURIComponent(app.metadata.namespace)}`)
+                .catch(e => {
+                    delete sets[key];
+                    throw new Error(`ApplicationSet ${owner.name}: ${e.message}`);
+                });
+            const set = await sets[key];
+            const spec = set.spec || {};
+            const template = (spec.template && spec.template.spec && spec.template.spec.syncPolicy) || {};
+            const automated = template.automated || null;
+            const frozen = APPSET_NO_UPDATE.has((spec.syncPolicy || {}).applicationsSync) || ignoresSyncPolicy(set, app.metadata.name);
+            return {automated, reenablesAutoSync: !!automated && !frozen};
+        };
     }
 
-    const appSetPolicyCache = {};
+    const getApp = app => apiRequest('GET', `${appPath(app.metadata.name)}?${nsQuery(app)}`);
 
-    async function desiredAutoSyncPolicy(app) {
-        const owner = (app.metadata.ownerReferences || []).find(o => o.kind === 'ApplicationSet');
-        if (!owner) return FALLBACK_AUTO_SYNC_POLICY;
-        if (!appSetPolicyCache[owner.name]) {
-            appSetPolicyCache[owner.name] = apiRequest('GET', `/api/v1/applicationsets/${encodeURIComponent(owner.name)}?appsetNamespace=${encodeURIComponent(app.metadata.namespace)}`)
-                .then(set => {
-                    const policy = set.spec && set.spec.template && set.spec.template.spec && set.spec.template.spec.syncPolicy;
-                    return (policy && policy.automated) || FALLBACK_AUTO_SYNC_POLICY;
-                })
-                .catch(() => FALLBACK_AUTO_SYNC_POLICY);
-        }
-        return appSetPolicyCache[owner.name];
+    const patchAutoSync = (app, automated) => apiRequest('PATCH', appPath(app.metadata.name), {
+        name: app.metadata.name,
+        appNamespace: app.metadata.namespace,
+        patch: JSON.stringify({spec: {syncPolicy: {automated}}}),
+        patchType: 'merge'
+    });
+
+    async function disableAutoSync(app) {
+        const previous = autoSyncPolicy(await getApp(app));
+        if (previous) await patchAutoSync(app, null);
+        return previous;
     }
 
-    async function setAutoSync(name, enabled) {
-        const fresh = await apiRequest('GET', appPath(name));
-        const has = isAutoSync(fresh);
-        if (has === enabled) return;
-        fresh.spec.syncPolicy = fresh.spec.syncPolicy || {};
-        fresh.spec.syncPolicy.automated = enabled ? await desiredAutoSyncPolicy(fresh) : null;
-        await apiRequest('PUT', appPath(name), fresh);
+    async function restoreAutoSync(app, appSetPolicy) {
+        const fresh = await getApp(app);
+        if (isAutoSync(fresh)) return false;
+        const {automated} = await appSetPolicy(fresh);
+        if (!automated) return false;
+        await patchAutoSync(fresh, automated);
+        return true;
     }
 
     async function rollbackApp(app, entryId) {
-        await setAutoSync(app.metadata.name, false);
-        await apiRequest('POST', `${appPath(app.metadata.name)}/rollback`, {id: entryId, prune: false, appNamespace: app.metadata.namespace});
+        const previous = await disableAutoSync(app);
+        const post = () => apiRequest('POST', `${appPath(app.metadata.name)}/rollback`, {id: entryId, prune: false, appNamespace: app.metadata.namespace});
+        try {
+            try {
+                await post();
+            } catch (e) {
+                if (!(previous && /auto-sync|automated/i.test(e.message))) throw e;
+                await sleep(2000);
+                await post();
+            }
+        } catch (e) {
+            if (previous) {
+                const fresh = await getApp(app).catch(() => null);
+                if (fresh && !isAutoSync(fresh)) await patchAutoSync(app, previous).catch(() => {});
+            }
+            throw e;
+        }
+        return {track: true, verify: async () => (isAutoSync(await getApp(app)) ? REVERTED_BY_APPSET : null)};
     }
 
-    async function syncApp(app, enableAutoSync) {
-        if (enableAutoSync) await setAutoSync(app.metadata.name, true);
+    async function syncApp(app, enableAutoSync, appSetPolicy) {
+        let enabled = false;
+        let note = '';
+        if (enableAutoSync) {
+            try {
+                enabled = await restoreAutoSync(app, appSetPolicy);
+                if (enabled) note = 'auto-sync re-enabled';
+            } catch (e) {
+                note = `auto-sync not restored: ${e.message}`;
+            }
+        }
         try {
             await apiRequest('POST', `${appPath(app.metadata.name)}/sync`, {prune: false, appNamespace: app.metadata.namespace});
         } catch (e) {
-            if (!(enableAutoSync && /operation is already in progress/i.test(e.message))) throw e;
+            if (enabled && /operation is already in progress/i.test(e.message)) return {track: true, message: 'auto-sync started it'};
+            throw new Error([e.message, note].filter(Boolean).join(' | '));
         }
+        return {track: true, message: note};
     }
 
-    const RESTARTABLE = {'apps/Deployment': true, 'apps/StatefulSet': true, 'apps/DaemonSet': true, 'argoproj.io/Rollout': true};
     const nodeKey = n => `${n.group || ''}/${n.kind}`;
+    const nodeId = (group, kind, namespace, name) => `${group || ''}/${kind}/${namespace || ''}/${name}`;
 
     async function workloadRefs(app, rollouts) {
         const refs = new Set();
@@ -194,30 +307,76 @@
                 resourceName: r.name, version: r.version, kind: r.kind, group: r.group
             });
             const data = await apiRequest('GET', `${appPath(app.metadata.name)}/resource?${params}`);
-            const manifest = JSON.parse(data.manifest || '{}');
-            const ref = manifest.spec && manifest.spec.workloadRef;
-            if (ref && ref.name) refs.add(`${(ref.apiVersion || '').split('/')[0]}/${ref.kind}/${r.namespace || ''}/${ref.name}`);
+            const ref = (JSON.parse(data.manifest || '{}').spec || {}).workloadRef;
+            if (ref && ref.name) refs.add(nodeId((ref.apiVersion || '').split('/')[0], ref.kind, r.namespace, ref.name));
         }
         return refs;
     }
 
     async function restartTargets(app) {
-        const tree = await apiRequest('GET', `${appPath(app.metadata.name)}/resource-tree?appNamespace=${encodeURIComponent(app.metadata.namespace)}`);
-        const nodes = (tree.nodes || []).filter(n => RESTARTABLE[nodeKey(n)] && !(n.parentRefs && n.parentRefs.length));
+        const tree = await apiRequest('GET', `${appPath(app.metadata.name)}/resource-tree?${nsQuery(app)}`);
+        const nodes = (tree.nodes || []).filter(n => RESTARTABLE.has(nodeKey(n)) && !(n.parentRefs && n.parentRefs.length));
         const refs = await workloadRefs(app, nodes.filter(n => n.kind === 'Rollout'));
-        return nodes.filter(n => !refs.has(`${n.group || ''}/${n.kind}/${n.namespace || ''}/${n.name}`));
+        return nodes.filter(n => !refs.has(nodeId(n.group, n.kind, n.namespace, n.name)));
+    }
+
+    let legacyActionsApi = false;
+    const isMissingRoute = e => [405, 501].includes(e.status) || (e.status === 404 && /^(not found)?$/i.test(e.serverMessage.trim()));
+
+    async function runRestartAction(app, n) {
+        const target = {namespace: n.namespace || '', resourceName: n.name, version: n.version, kind: n.kind, group: n.group || ''};
+        if (!legacyActionsApi) {
+            try {
+                await apiRequest('POST', `${appPath(app.metadata.name)}/resource/actions/v2`, {
+                    name: app.metadata.name, appNamespace: app.metadata.namespace, ...target, action: 'restart', resourceActionParameters: []
+                });
+                return;
+            } catch (e) {
+                if (!isMissingRoute(e)) throw e;
+                legacyActionsApi = true;
+            }
+        }
+        const params = new URLSearchParams({appNamespace: app.metadata.namespace, ...target});
+        await apiRequest('POST', `${appPath(app.metadata.name)}/resource/actions?${params}`, 'restart');
     }
 
     async function restartApp(app) {
         const targets = await restartTargets(app);
         if (targets.length === 0) return {status: 'skipped', message: 'no Deployment/Rollout'};
+        const done = [];
+        const failed = [];
         for (const n of targets) {
-            await apiRequest('POST', `${appPath(app.metadata.name)}/resource/actions/v2`, {
-                name: app.metadata.name, appNamespace: app.metadata.namespace, namespace: n.namespace || '',
-                resourceName: n.name, version: n.version, kind: n.kind, group: n.group || '', action: 'restart', resourceActionParameters: []
-            });
+            try {
+                await runRestartAction(app, n);
+                done.push(`${n.kind}/${n.name}`);
+            } catch (e) {
+                failed.push(`${n.kind}/${n.name}: ${e.message}`);
+            }
         }
-        return {status: 'ok', message: targets.map(n => `${n.kind}/${n.name}`).join(', ')};
+        if (failed.length === 0) return {status: 'ok', message: done.join(', ')};
+        return {status: 'error', message: [done.length ? `restarted ${done.join(', ')}` : '', `failed ${failed.join('; ')}`].filter(Boolean).join(' | ')};
+    }
+
+    async function waitForOperations(listOperations, pending, onDone) {
+        const deadline = Date.now() + OP_TIMEOUT_MS;
+        const left = new Map(pending.map(p => [p.key, p]));
+        while (left.size && Date.now() < deadline) {
+            await sleep(OP_POLL_MS);
+            let items;
+            try {
+                items = await listOperations();
+            } catch (_) {
+                continue;
+            }
+            for (const app of items) {
+                const p = left.get(appKey(app));
+                const op = app.status && app.status.operationState;
+                if (!p || !op || !op.phase || op.phase === 'Running' || op.phase === 'Terminating' || (op.startedAt || '') === p.before) continue;
+                left.delete(p.key);
+                await onDone(p, op.phase === 'Succeeded' ? 'ok' : 'error', [op.phase, op.message].filter(Boolean).join(': '));
+            }
+        }
+        for (const p of left.values()) await onDone(p, 'error', 'timed out waiting for operation');
     }
 
     const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
@@ -274,7 +433,62 @@
         );
     };
 
-    const BranchSection = ({namespace, branch, onBusy}) => {
+    const mutedStyle = {color: '#6d7f8b', fontSize: '13px'};
+    const monoCell = {...cellStyle, fontFamily: 'monospace'};
+    const stopPropagation = e => e.stopPropagation();
+
+    const AppStatusTable = ({apps, histories, resolving, results}) => h(Table, {columns: [
+        {label: 'Application', width: '30%'}, {label: 'Sync', width: '110px'}, {label: 'Health', width: '120px'},
+        {label: 'Auto-sync', width: '90px'}, {label: 'Build commit', width: '120px'}, {label: 'Result', width: '30%'}
+    ]}, apps.map(app => {
+        const key = appKey(app);
+        const res = results[key];
+        const cur = currentCommit(app, histories);
+        return h('tr', {key},
+            h('td', {style: cellStyle, title: key}, h('a', {href: `/applications/${key}`}, app.metadata.name)),
+            h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
+            h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
+            h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
+            h('td', {style: monoCell, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
+            h('td', {style: cellStyle, title: res ? res.message : ''}, res && h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : ''))
+        );
+    }));
+
+    const RollbackHistoryRow = ({target, total, selected, busy, onPick}) => {
+        const isCurrent = target.current.size === total;
+        const search = githubCommitSearch(target.configRepo, target.commit);
+        const pick = () => !busy && onPick(selected ? '' : target.commit);
+        return h('tr', {onClick: pick, style: {cursor: busy ? 'default' : 'pointer', background: selected ? '#e6f7fc' : undefined}},
+            h('td', {style: cellStyle}, h('input', {type: 'radio', checked: selected, disabled: busy, onChange: pick, onClick: stopPropagation, style: {margin: 0}})),
+            h('td', {style: monoCell, title: target.commit},
+                search ? h('a', {...linkProps(search), onClick: stopPropagation}, shortSha(target.commit)) : shortSha(target.commit),
+                isCurrent && h('span', {style: {marginLeft: '6px'}}, h(Badge, {text: 'current'}))),
+            h('td', {style: cellStyle}, target.slackUsername || '-'),
+            h('td', {style: cellStyle}, fmtTime(target.commitTime) || '-'),
+            h('td', {style: cellStyle}, fmtTime(target.deployedAt) || '-'),
+            h('td', {style: cellStyle}, target.initiatedBy || '-'),
+            h('td', {style: monoCell, title: target.configRevision || ''},
+                target.configRevision && target.configRepo
+                    ? h('a', {...linkProps(`${target.configRepo}/commit/${target.configRevision}`), onClick: stopPropagation}, shortSha(target.configRevision))
+                    : shortSha(target.configRevision) || '-'),
+            h('td', {style: cellStyle, title: Array.from(target.apps).join('\n')},
+                `${target.apps.size}/${total}${target.current.size && !isCurrent ? ` (${target.current.size} current)` : ''}`)
+        );
+    };
+
+    const RollbackHistoryTable = ({targets, total, targetCommit, busy, resolving, onPick}) => h('div', null,
+        h('div', {style: sectionTitleStyle}, 'Rollback history',
+            resolving && h('span', {style: {textTransform: 'none', fontWeight: 400, marginLeft: '8px'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' resolving build commits...')),
+        !resolving && targets.length === 0
+            ? h('div', {style: mutedStyle}, 'No build commits found in app history.')
+            : h(Table, {columns: [
+                {label: '', width: '36px'}, {label: 'Build commit', width: '130px'}, {label: 'Built by', width: '120px'},
+                {label: 'Committed', width: '170px'}, {label: 'Last deployed', width: '170px'}, {label: 'Deployed by', width: '140px'},
+                {label: 'Launchpad commit', width: '140px'}, {label: 'Apps', width: '120px'}
+            ]}, targets.map(t => h(RollbackHistoryRow, {key: t.commit, target: t, total, selected: targetCommit === t.commit, busy, onPick})))
+    );
+
+    const BranchSection = ({scopeKey, branch, onBusy}) => {
         const [apps, setApps] = React.useState([]);
         const [histories, setHistories] = React.useState({});
         const [loading, setLoading] = React.useState(false);
@@ -286,13 +500,18 @@
         const [enableAutoSync, setEnableAutoSync] = React.useState(true);
         const [confirm, setConfirm] = React.useState(null);
         const loadId = React.useRef(0);
+        const namespace = nsOfKey(scopeKey);
+
+        const fetchApps = async () => (await listBranchApps(branch, SECTION_FIELDS))
+            .filter(a => nsKey(a) === scopeKey)
+            .sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
 
         const loadApps = async () => {
             const id = ++loadId.current;
             setLoading(true);
             setError(null);
             try {
-                const items = (await listApps(`branch=${branch}`)).filter(a => destNs(a) === namespace).sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
+                const items = await fetchApps();
                 if (id !== loadId.current) return;
                 setApps(items);
                 setResolving(true);
@@ -314,54 +533,77 @@
             setResults({});
             setTargetCommit('');
             loadApps();
-        }, [namespace, branch]);
+        }, [scopeKey, branch]);
 
         React.useEffect(() => {
             if (onBusy) onBusy(branch, busy);
         }, [busy]);
 
-        const setResult = (name, status, message) => setResults(r => ({...r, [name]: {status, message}}));
+        const setResult = (key, status, message) => setResults(r => ({...r, [key]: {status, message}}));
 
         const runBulk = async (items, fn) => {
             setBusy(true);
-            items.forEach(({app}) => setResult(app.metadata.name, 'running', ''));
-            await runPool(items, async item => {
+            try {
+                items.forEach(({app}) => setResult(appKey(app), 'running', ''));
+                let before;
                 try {
-                    const r = (await fn(item)) || {};
-                    setResult(item.app.metadata.name, r.status || 'ok', r.message || '');
+                    before = Object.fromEntries((await fetchApps()).map(a => [appKey(a), operationStart(a)]));
                 } catch (e) {
-                    setResult(item.app.metadata.name, 'error', e.message);
+                    items.forEach(({app}) => setResult(appKey(app), 'error', `could not read operation state: ${e.message}`));
+                    return;
                 }
-            });
-            setBusy(false);
-            loadApps();
+                const pending = [];
+                await runPool(items, async item => {
+                    const key = appKey(item.app);
+                    try {
+                        const r = (await fn(item)) || {};
+                        if (r.track) {
+                            pending.push({key, before: before[key] || '', note: r.message || '', verify: r.verify});
+                            setResult(key, 'running', ['waiting for operation', r.message].filter(Boolean).join(', '));
+                        } else {
+                            setResult(key, r.status || 'ok', r.message || '');
+                        }
+                    } catch (e) {
+                        setResult(key, 'error', e.message);
+                    }
+                });
+                if (pending.length === 0) return;
+                await waitForOperations(() => listBranchApps(branch, OPERATION_FIELDS), pending, async (p, status, message) => {
+                    const problem = status === 'ok' && p.verify ? await p.verify().catch(e => `could not verify auto-sync: ${e.message}`) : null;
+                    setResult(p.key, problem ? 'error' : status, problem || [message, p.note].filter(Boolean).join(' | '));
+                });
+            } finally {
+                setBusy(false);
+                loadApps();
+            }
         };
 
         const targets = React.useMemo(() => rollbackTargets(apps, histories), [apps, histories]);
         const isProd = apps.some(a => (a.metadata.labels || {}).environment === 'prod');
-        const scope = `Namespace ${namespace}, branch ${branch}.`;
+        const requireText = isProd ? namespace : null;
+        const scope = `Namespace ${nsKeyLabel(scopeKey)}, branch ${branchLabel(branch)}.`;
+        const stale = loading || resolving;
+        const noApps = busy || loading || apps.length === 0;
+        const appNames = list => list.map(a => a.metadata.name);
 
-        const planRollback = () => {
-            const plan = [];
-            const skipped = [];
-            apps.forEach(app => {
-                const entry = findEntryForCommit(app, histories, targetCommit);
-                if (!entry) skipped.push({app, reason: 'commit not in history'});
-                else if (currentCommit(app, histories) === targetCommit && app.status.sync.status === 'Synced') skipped.push({app, reason: 'already on commit'});
-                else plan.push({app, entryId: entry.id});
-            });
-            return {plan, skipped};
+        const freshPlan = async () => {
+            const items = await fetchApps();
+            const resolved = await resolveAppHistories(items);
+            return {items, resolved, ...planRollback(items, resolved, targetCommit)};
         };
 
         const onSyncAll = () => setConfirm({
             title: `Sync ${apps.length} application(s)`,
             lines: [
                 `${scope} Each app will sync to the latest revision in git (latest CI build for the branch).`,
-                enableAutoSync ? 'Auto-sync will be re-enabled on every app.' : 'Auto-sync settings are left unchanged.'
+                enableAutoSync ? 'Auto-sync will be re-enabled on apps whose ApplicationSet template enables it; other apps are left as they are.' : 'Auto-sync settings are left unchanged.'
             ],
-            apps: apps.map(a => a.metadata.name),
-            requireText: isProd ? namespace : null,
-            run: () => runBulk(apps.map(app => ({app})), ({app}) => syncApp(app, enableAutoSync))
+            apps: appNames(apps),
+            requireText,
+            run: () => {
+                const appSetPolicy = appSetPolicyLookup();
+                return runBulk(apps.map(app => ({app})), ({app}) => syncApp(app, enableAutoSync, appSetPolicy));
+            }
         });
 
         const onRestartAll = () => setConfirm({
@@ -370,26 +612,75 @@
                 `${scope} Runs the ArgoCD "restart" action on every Deployment, StatefulSet, DaemonSet and Argo Rollout in each app.`,
                 'Deployments do a rolling restart; Rollouts restart pods via spec.restartAt, respecting maxUnavailable. Deployments referenced by a Rollout workloadRef are left alone. No git or image change.'
             ],
-            apps: apps.map(a => a.metadata.name),
-            requireText: isProd ? namespace : null,
+            apps: appNames(apps),
+            requireText,
             run: () => runBulk(apps.map(app => ({app})), ({app}) => restartApp(app))
         });
 
-        const onRollbackAll = () => {
-            const {plan, skipped} = planRollback();
-            skipped.forEach(({app, reason}) => setResult(app.metadata.name, 'skipped', reason));
-            if (plan.length === 0) return;
+        const applySkipped = skipped => skipped.forEach(({app, reason}) => setResult(appKey(app), 'skipped', reason));
+
+        const appSetWarning = async plan => {
+            const appSetPolicy = appSetPolicyLookup();
+            const flags = await Promise.all(plan.map(({app}) => appSetPolicy(app).then(p => p.reenablesAutoSync, () => true)));
+            const reverting = plan.filter((_, i) => flags[i]).map(p => p.app.metadata.name);
+            return reverting.length
+                ? `Warning: the ApplicationSet will re-enable auto-sync and undo the rollback for ${reverting.length} app(s) (${reverting.join(', ')}). Add /spec/syncPolicy to its ignoreApplicationDifferences to keep the rollback.`
+                : '';
+        };
+
+        const onRollbackAll = async () => {
+            const commit = targetCommit;
+            setBusy(true);
+            let fresh;
+            let warning;
+            try {
+                fresh = await freshPlan();
+                warning = await appSetWarning(fresh.plan);
+            } catch (e) {
+                setError(e.message);
+                return;
+            } finally {
+                setBusy(false);
+            }
+            loadId.current++;
+            setApps(fresh.items);
+            setHistories(fresh.resolved);
+            applySkipped(fresh.skipped);
+            if (fresh.plan.length === 0) return;
+            const confirmed = new Set(fresh.plan.map(p => appKey(p.app)));
             setConfirm({
-                title: `Rollback ${plan.length} application(s) to ${shortSha(targetCommit)}`,
+                title: `Rollback ${fresh.plan.length} application(s) to ${shortSha(commit)}`,
                 lines: [
-                    `${scope} Auto-sync will be disabled on each app before rollback.`,
+                    `${scope} Auto-sync will be disabled on each app before rollback, and restored if the rollback request fails.`,
                     'This does not change launchpad. Syncing or re-enabling auto-sync later redeploys the latest build; revert _live_build.yml for a permanent rollback.',
-                    skipped.length ? `${skipped.length} app(s) skipped (see table).` : ''
+                    warning,
+                    fresh.skipped.length ? `${fresh.skipped.length} app(s) skipped (see table).` : ''
                 ].filter(Boolean),
-                apps: plan.map(p => p.app.metadata.name),
-                requireText: isProd ? namespace : null,
-                run: () => runBulk(plan, ({app, entryId}) => rollbackApp(app, entryId))
+                apps: appNames(fresh.plan.map(p => p.app)),
+                requireText,
+                run: async () => {
+                    setBusy(true);
+                    let latest;
+                    try {
+                        latest = await freshPlan();
+                    } catch (e) {
+                        setError(e.message);
+                        setBusy(false);
+                        return;
+                    }
+                    applySkipped(latest.skipped.filter(s => confirmed.has(appKey(s.app))));
+                    await runBulk(latest.plan.filter(p => confirmed.has(appKey(p.app))), ({app, entryId}) => rollbackApp(app, entryId));
+                }
             });
+        };
+
+        const appsView = () => {
+            if (loading && apps.length === 0) return h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...');
+            if (apps.length === 0) return !error && h('div', {style: mutedStyle}, 'No applications.');
+            return h('div', null,
+                h(AppStatusTable, {apps, histories, resolving, results}),
+                h(RollbackHistoryTable, {targets, total: apps.length, targetCommit, busy, resolving, onPick: setTargetCommit})
+            );
         };
 
         return h('div', null,
@@ -401,149 +692,104 @@
             error && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, error),
             h('div', {style: {display: 'flex', gap: '12px 24px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center'}},
                 h('div', {style: {display: 'flex', gap: '12px', alignItems: 'center'}},
-                    h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || loading || apps.length === 0, onClick: onSyncAll},
+                    h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: noApps, onClick: onSyncAll},
                         h('i', {className: 'fa fa-sync'}), ' Sync all'),
                     h('label', {style: {fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap', margin: 0}},
                         h('input', {type: 'checkbox', checked: enableAutoSync, onChange: e => setEnableAutoSync(e.target.checked), style: {margin: 0}}),
                         'Re-enable auto-sync')
                 ),
-                h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || loading || apps.length === 0, onClick: onRestartAll},
+                h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: noApps, onClick: onRestartAll},
                     h('i', {className: 'fa fa-redo-alt'}), ' Restart all'),
-                h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || !targetCommit, onClick: onRollbackAll, title: targetCommit ? '' : 'Select a build in Rollback history below'},
+                h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || stale || !targetCommit, onClick: onRollbackAll, title: targetCommit ? '' : 'Select a build in Rollback history below'},
                     h('i', {className: 'fa fa-step-backward'}), targetCommit ? ` Rollback all to ${shortSha(targetCommit)}` : ' Rollback all'),
                 h('button', {className: 'argo-button argo-button--base-o', style: {...buttonStyle, marginLeft: 'auto'}, disabled: loading || busy, onClick: loadApps},
                     h('i', {className: loading ? 'fa fa-spinner fa-spin' : 'fa fa-redo'}), ' Refresh')
             ),
-
-            loading && apps.length === 0
-                ? h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...')
-                : !error && apps.length === 0
-                    ? h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'No applications.')
-                    : apps.length > 0 && h(Table, {columns: [
-                        {label: 'Application', width: '30%'}, {label: 'Sync', width: '110px'}, {label: 'Health', width: '120px'},
-                        {label: 'Auto-sync', width: '90px'}, {label: 'Build commit', width: '120px'}, {label: 'Result', width: '30%'}
-                    ]}, apps.map(app => {
-                        const name = app.metadata.name;
-                        const res = results[name];
-                        const cur = currentCommit(app, histories);
-                        return h('tr', {key: name},
-                            h('td', {style: cellStyle, title: name}, h('a', {href: `/applications/${app.metadata.namespace}/${name}`}, name)),
-                            h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
-                            h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
-                            h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
-                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
-                            h('td', {style: cellStyle, title: res && res.message ? res.message : ''}, res ? h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : '') : '')
-                        );
-                    })),
-
-            apps.length > 0 && h('div', null,
-                h('div', {style: sectionTitleStyle}, 'Rollback history', resolving && h('span', {style: {textTransform: 'none', fontWeight: 400, marginLeft: '8px'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' resolving build commits...')),
-                !resolving && targets.length === 0
-                    ? h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'No build commits found in app history.')
-                    : h(Table, {columns: [
-                        {label: '', width: '36px'}, {label: 'Build commit', width: '130px'}, {label: 'Built by', width: '120px'},
-                        {label: 'Committed', width: '170px'}, {label: 'Last deployed', width: '170px'}, {label: 'Deployed by', width: '140px'},
-                        {label: 'Launchpad commit', width: '140px'}, {label: 'Apps', width: '120px'}
-                    ]}, targets.map(t => {
-                        const selected = targetCommit === t.commit;
-                        const isCurrent = t.current.size === apps.length;
-                        const search = githubCommitSearch(t.configRepo, t.commit);
-                        const pick = () => !busy && setTargetCommit(selected ? '' : t.commit);
-                        return h('tr', {key: t.commit, onClick: pick, style: {cursor: busy ? 'default' : 'pointer', background: selected ? '#e6f7fc' : undefined}},
-                            h('td', {style: cellStyle}, h('input', {type: 'radio', checked: selected, disabled: busy, onChange: pick, onClick: e => e.stopPropagation(), style: {margin: 0}})),
-                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: t.commit},
-                                search ? h('a', {...linkProps(search), onClick: e => e.stopPropagation()}, shortSha(t.commit)) : shortSha(t.commit),
-                                isCurrent && h('span', {style: {marginLeft: '6px', fontFamily: 'inherit'}}, h(Badge, {text: 'current'}))),
-                            h('td', {style: cellStyle}, t.slackUsername || '-'),
-                            h('td', {style: cellStyle}, fmtTime(t.commitTime) || '-'),
-                            h('td', {style: cellStyle}, fmtTime(t.deployedAt) || '-'),
-                            h('td', {style: cellStyle}, t.initiatedBy || '-'),
-                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: t.configRevision || ''},
-                                t.configRevision && t.configRepo
-                                    ? h('a', {...linkProps(`${t.configRepo}/commit/${t.configRevision}`), onClick: e => e.stopPropagation()}, shortSha(t.configRevision))
-                                    : shortSha(t.configRevision) || '-'),
-                            h('td', {style: cellStyle, title: Array.from(t.apps).join('\n')}, `${t.apps.size}/${apps.length}${t.current.size && !isCurrent ? ` (${t.current.size} current)` : ''}`)
-                        );
-                    }))
-            )
+            appsView()
         );
+    };
+
+    const BranchAccordion = ({scopeKey, branch, count, open, busy, onToggle, onBusy}) =>
+        h('div', {style: {background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)', marginBottom: '12px'}},
+            h('div', {onClick: () => onToggle(branch), style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', cursor: 'pointer', userSelect: 'none'}},
+                h('i', {className: `fa fa-fw fa-chevron-${open ? 'down' : 'right'}`, style: {color: '#6d7f8b'}}),
+                h('strong', null, branchLabel(branch)),
+                h('span', {style: mutedStyle}, `${count} app${count === 1 ? '' : 's'}`),
+                busy && h('i', {className: 'fa fa-spinner fa-spin', style: {color: '#0dadea'}})
+            ),
+            open !== undefined && h('div', {style: {display: open ? 'block' : 'none', padding: '16px', borderTop: '1px solid #eff3f5', background: '#f8fbfb'}},
+                h(BranchSection, {scopeKey, branch, onBusy}))
+        );
+
+    const buildIndex = items => {
+        const idx = {};
+        items.forEach(a => {
+            if (!destNs(a)) return;
+            const key = nsKey(a);
+            const br = branchOf(a);
+            idx[key] = idx[key] || {};
+            idx[key][br] = (idx[key][br] || 0) + 1;
+        });
+        return idx;
     };
 
     const BulkSyncPage = () => {
         const [index, setIndex] = React.useState(null);
         const [indexError, setIndexError] = React.useState(null);
-        const [namespace, setNamespace] = React.useState('');
+        const [scopeKey, setScopeKey] = React.useState('');
         const [branch, setBranch] = React.useState('');
         const [open, setOpen] = React.useState({});
         const [busyBranches, setBusyBranches] = React.useState({});
 
         React.useEffect(() => {
-            listApps(null, ['items.metadata.name', 'items.metadata.labels', 'items.spec.destination']).then(items => {
-                const idx = {};
-                items.forEach(a => {
-                    const ns = destNs(a);
-                    const br = branchOf(a);
-                    if (!ns || !br) return;
-                    idx[ns] = idx[ns] || {};
-                    idx[ns][br] = (idx[ns][br] || 0) + 1;
-                });
-                setIndex(idx);
-            }).catch(e => setIndexError(e.message));
+            listApps(null, INDEX_FIELDS).then(items => setIndex(buildIndex(items))).catch(e => setIndexError(e.message));
         }, []);
 
-        const namespaces = index ? Object.keys(index).sort() : [];
-        const branches = index && namespace ? Object.keys(index[namespace] || {}).sort() : [];
+        const counts = (index && index[scopeKey]) || {};
+        const scopes = index ? Object.keys(index).sort((a, b) => nsKeyLabel(a).localeCompare(nsKeyLabel(b))) : [];
+        const branches = scopeKey ? Object.keys(counts).sort() : [];
         const busy = Object.values(busyBranches).some(Boolean);
         const onBusy = React.useCallback((br, value) => setBusyBranches(m => ({...m, [br]: value})), []);
+        const toggle = br => setOpen(o => ({...o, [br]: !o[br]}));
 
         React.useEffect(() => {
             setBusyBranches({});
             setOpen(branches.length === 1 ? {[branches[0]]: true} : {});
-        }, [namespace, index]);
-
-        const toggle = br => setOpen(o => ({...o, [br]: !o[br]}));
+        }, [scopeKey, index]);
 
         return h('div', {style: {padding: '24px 16px', maxWidth: '1400px', boxSizing: 'border-box'}},
             indexError && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, indexError),
             h('div', {style: {display: 'flex', gap: '16px 24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
                 h('div', {style: {maxWidth: '100%'}},
                     h('div', {style: labelStyle}, 'Namespace'),
-                    h('select', {style: selectStyle, value: namespace, disabled: !index || busy, onChange: e => { setNamespace(e.target.value); setBranch(''); }},
+                    h('select', {style: selectStyle, value: scopeKey, disabled: !index || busy, onChange: e => { setScopeKey(e.target.value); setBranch(''); }},
                         h('option', {value: ''}, index ? 'Select namespace' : 'Loading...'),
-                        namespaces.map(ns => h('option', {key: ns, value: ns}, ns))
+                        scopes.map(key => h('option', {key, value: key}, nsKeyLabel(key)))
                     )
                 ),
                 h('div', {style: {maxWidth: '100%'}},
                     h('div', {style: labelStyle}, 'Branch'),
-                    h('select', {style: selectStyle, value: branch, disabled: !namespace || busy, onChange: e => setBranch(e.target.value)},
-                        h('option', {value: ''}, namespace ? `All branches (${branches.length})` : 'All branches'),
-                        branches.map(br => h('option', {key: br, value: br}, `${br} (${index[namespace][br]})`))
+                    h('select', {style: selectStyle, value: branch, disabled: !scopeKey || busy, onChange: e => setBranch(e.target.value)},
+                        h('option', {value: ''}, scopeKey ? `All branches (${branches.length})` : 'All branches'),
+                        branches.map(br => h('option', {key: br, value: br}, `${branchLabel(br)} (${counts[br]})`))
                     )
                 )
             ),
 
-            index && !namespace && h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'Select a namespace to see its branches.'),
+            index && !scopeKey && h('div', {style: mutedStyle}, 'Select a namespace to see its branches.'),
 
-            namespace && branch && h(BranchSection, {key: `${namespace}/${branch}`, namespace, branch, onBusy}),
+            scopeKey && branch && h(BranchSection, {key: `${scopeKey}/${branch}`, scopeKey, branch, onBusy}),
 
-            namespace && !branch && branches.map(br => {
-                const isOpen = !!open[br];
-                const mounted = br in open;
-                return h('div', {key: `${namespace}/${br}`, style: {background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)', marginBottom: '12px'}},
-                    h('div', {onClick: () => toggle(br), style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', cursor: 'pointer', userSelect: 'none'}},
-                        h('i', {className: `fa fa-fw fa-chevron-${isOpen ? 'down' : 'right'}`, style: {color: '#6d7f8b'}}),
-                        h('strong', null, br),
-                        h('span', {style: {color: '#6d7f8b', fontSize: '13px'}}, `${index[namespace][br]} app${index[namespace][br] === 1 ? '' : 's'}`),
-                        busyBranches[br] && h('i', {className: 'fa fa-spinner fa-spin', style: {color: '#0dadea'}})
-                    ),
-                    mounted && h('div', {style: {display: isOpen ? 'block' : 'none', padding: '16px', borderTop: '1px solid #eff3f5', background: '#f8fbfb'}},
-                        h(BranchSection, {namespace, branch: br, onBusy}))
-                );
-            })
+            scopeKey && !branch && branches.map(br => h(BranchAccordion, {
+                key: `${scopeKey}/${br}`, scopeKey, branch: br, count: counts[br], open: open[br], busy: busyBranches[br], onToggle: toggle, onBusy
+            }))
         );
     };
 
     const describeSidebarItem = (title, description) => {
+        const registry = window.extSidebarDescriptions || (window.extSidebarDescriptions = {items: {}, observer: null});
+        registry.items[title] = description;
+        if (registry.observer) return;
         if (!document.getElementById('ext-nav-icon-style')) {
             const style = document.createElement('style');
             style.id = 'ext-nav-icon-style';
@@ -551,18 +797,20 @@
             document.head.appendChild(style);
         }
         const attach = el => {
-            if (el.dataset.extDescription || el.textContent !== title) return;
+            const text = registry.items[el.textContent];
+            if (el.dataset.extDescription || !text) return;
             el.dataset.extDescription = '1';
             const d = document.createElement('div');
-            d.textContent = description;
+            d.textContent = text;
             d.style.cssText = 'font-size:12px;font-weight:400;opacity:0.8;margin-top:4px;max-width:240px;white-space:normal;line-height:1.4';
             el.appendChild(d);
         };
-        new MutationObserver(mutations => mutations.forEach(m => m.addedNodes.forEach(n => {
+        registry.observer = new MutationObserver(mutations => mutations.forEach(m => m.addedNodes.forEach(n => {
             if (n.nodeType !== 1) return;
             if (n.classList.contains('sidebar__tooltip')) attach(n);
             else if (n.matches('[data-tippy-root], .tippy-popper')) n.querySelectorAll('.sidebar__tooltip').forEach(attach);
-        }))).observe(document.body, {childList: true, subtree: true});
+        })));
+        registry.observer.observe(document.body, {childList: true, subtree: true});
     };
 
     const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(BulkSyncPage, 'Bulk Sync', '/bulk-sync', 'fa-layer-group fa-fw ext-nav-icon');

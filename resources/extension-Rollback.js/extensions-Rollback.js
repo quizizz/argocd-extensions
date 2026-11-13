@@ -38,28 +38,29 @@
         return resp.json().catch(() => ({}));
     }
 
-    // Disables auto-sync by PUTting the updated application spec, then calls rollback.
-    // The rollback API rejects with FailedPrecondition if auto-sync is still enabled.
+    const metaKey = (application, id) => `${application.metadata.namespace}/${application.metadata.name}#${id}`;
+    const buildMeta = (application, id) => buildCommitCache[metaKey(application, id)];
+
     async function callRollback(application, id) {
         const appName = application.metadata.name;
         const appNamespace = application.metadata.namespace;
 
         if (application.spec.syncPolicy && application.spec.syncPolicy.automated) {
-            const update = JSON.parse(JSON.stringify(application));
-            update.spec.syncPolicy.automated = null;
-            await apiRequest('PUT', `/api/v1/applications/${encodeURIComponent(appName)}`, update);
+            await apiRequest('PATCH', `/api/v1/applications/${encodeURIComponent(appName)}`, {
+                name: appName, appNamespace, patchType: 'merge', patch: JSON.stringify({spec: {syncPolicy: {automated: null}}})
+            });
         }
 
         await apiRequest('POST', `/api/v1/applications/${encodeURIComponent(appName)}/rollback`, {id, appNamespace});
     }
 
     // Confirmation modal — reuses ArgoCD's popup CSS classes for identical look
-    const ConfirmModal = ({appName, entry, autoSync, isLatest, onConfirm, onCancel}) => {
+    const ConfirmModal = ({application, appName, entry, autoSync, isLatest, onConfirm, onCancel}) => {
         const [closeHover, setCloseHover] = React.useState(false);
         const [closeActive, setCloseActive] = React.useState(false);
         const title = h('strong', null, isLatest ? 'Redeploy application' : 'Rollback application');
         const boldName = h('strong', null, appName);
-        const meta = buildCommitCache[entry.id];
+        const meta = buildMeta(application, entry.id);
         const boldCommit = h('strong', null, (meta && meta.commit) || fullRev(entry));
         const baseMessage = isLatest
             ? h('p', null, `Are you sure you want to redeploy application `, boldName, ` to commit `, boldCommit, '?')
@@ -159,7 +160,6 @@
         React.useEffect(() => {
             prefetchBuildCommits(application).then(() => setMetaLoading(false));
         }, []);
-        const revMeta = buildCommitCache;
 
         const showSnackbar = (message, type) => {
             setSnackbar({message, type});
@@ -190,6 +190,7 @@
             {style: {padding: '20px'}},
 
             confirmEntry && h(ConfirmModal, {
+                application,
                 appName,
                 entry: confirmEntry,
                 autoSync,
@@ -233,8 +234,8 @@
                         const rev = fullRev(entry);
                         const isRolling = rolling === entry.id;
 
-                        const meta = revMeta[entry.id];
-                        const buildCommit = meta && meta.commit;
+                        const meta = buildMeta(application, entry.id);
+                        const buildCommit = (meta && meta.commit) || rev;
                         const slackUser = meta && meta.slackUsername;
 
                         return h('div', {key: entry.id, className: 'row application-deployment-history__item'},
@@ -285,15 +286,12 @@
         );
     };
 
-    // Module-level cache: pre-read build.commit and build.slackUsername keyed by entry.id.
-    // Populated by ToolbarButton (always mounted) so data is ready when flyout opens.
     const buildCommitCache = {};
 
-    // Fetches build.commit for all history entries via appdetails API (parallel, deduplicated by revision).
     async function prefetchBuildCommits(application) {
         const appName = application.metadata.name;
         const history = (application.status.history || []).slice();
-        const uncached = history.filter(e => buildCommitCache[e.id] === undefined);
+        const uncached = history.filter(e => buildMeta(application, e.id) === undefined);
         if (uncached.length === 0) return;
 
         // Deduplicate by first revision — same revision means same values, no need to call twice.
@@ -319,6 +317,7 @@
             const key = isMultiSrcKey || entry.id;
             const ids = seen[key] || [entry.id];
 
+            let failed = false;
             for (let i = 0; i < sources.length; i++) {
                 const source = sources[i];
                 if (!source || !source.repoURL) continue;
@@ -331,12 +330,14 @@
                     const commit = params && params.find(p => p.name === 'build.commit');
                     const slack = params && params.find(p => p.name === 'build.slackUsername');
                     if (commit) {
-                        ids.forEach(id => { buildCommitCache[id] = {commit: commit.value, slackUsername: slack ? slack.value : null}; });
+                        ids.forEach(id => { buildCommitCache[metaKey(application, id)] = {commit: commit.value, slackUsername: slack ? slack.value : null}; });
                         return;
                     }
-                } catch (_) {}
+                } catch (_) {
+                    failed = true;
+                }
             }
-            ids.forEach(id => { buildCommitCache[id] = null; }); // not found
+            if (!failed) ids.forEach(id => { buildCommitCache[metaKey(application, id)] = null; });
         }));
     }
 
