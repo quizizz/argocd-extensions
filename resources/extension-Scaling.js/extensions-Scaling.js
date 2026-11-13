@@ -372,7 +372,24 @@
         );
     };
 
+    const describeSidebarItem = (title, description) => {
+        const attach = el => {
+            if (el.dataset.extDescription || el.textContent !== title) return;
+            el.dataset.extDescription = '1';
+            const d = document.createElement('div');
+            d.textContent = description;
+            d.style.cssText = 'font-size:12px;font-weight:400;opacity:0.8;margin-top:4px;max-width:240px;white-space:normal;line-height:1.4';
+            el.appendChild(d);
+        };
+        new MutationObserver(mutations => mutations.forEach(m => m.addedNodes.forEach(n => {
+            if (n.nodeType !== 1) return;
+            if (n.classList.contains('sidebar__tooltip')) attach(n);
+            else if (n.matches('[data-tippy-root], .tippy-popper')) n.querySelectorAll('.sidebar__tooltip').forEach(attach);
+        }))).observe(document.body, {childList: true, subtree: true});
+    };
+
     const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(ScalingPage, 'Scaling', '/scaling', 'fa-expand-arrows-alt fa-fw');
+    describeSidebarItem('Scaling', 'Replica counts, KEDA min/max and autoscaling triggers for every app in a namespace.');
     const appRoot = document.getElementById('app');
     if (!appRoot || appRoot.childElementCount) {
         registerPage();
