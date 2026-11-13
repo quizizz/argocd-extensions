@@ -76,10 +76,12 @@
     const clusterOfKey = key => key.slice(0, key.lastIndexOf('|'));
     const scopeFromParams = (index, params) => {
         const ns = params.get('namespace');
-        if (!ns) return '';
+        if (!ns) return {scope: '', notice: ''};
         const cluster = params.get('cluster');
         const keys = Object.keys(index).filter(k => k.slice(k.lastIndexOf('|') + 1) === ns);
-        return keys.find(k => (cluster ? clusterOfKey(k) === cluster : IN_CLUSTER.has(clusterOfKey(k)))) || keys[0] || '';
+        const scope = keys.find(k => (cluster ? clusterOfKey(k) === cluster : IN_CLUSTER.has(clusterOfKey(k)))) || (!cluster && keys.length === 1 ? keys[0] : '');
+        if (scope) return {scope, notice: ''};
+        return {scope: '', notice: !cluster && keys.length > 1 ? `Namespace ${ns} exists on ${keys.length} clusters, pick one.` : `Namespace ${ns}${cluster ? ` on cluster ${cluster}` : ''} not found.`};
     };
     const scopeParams = key => ({
         namespace: key ? key.slice(key.lastIndexOf('|') + 1) : '',
@@ -161,7 +163,7 @@
         return result;
     }
 
-    async function resolveAppHistories(apps) {
+    async function resolveAppHistories(apps, isStale) {
         const out = {};
         const tasks = [];
         apps.forEach(app => {
@@ -169,6 +171,7 @@
             historyOf(app).forEach(entry => tasks.push({app, entry}));
         });
         await runPool(tasks, async ({app, entry}) => {
+            if (isStale && isStale()) return;
             const record = out[appKey(app)];
             try {
                 record.byId[entry.id] = await resolveBuildCommit(app, entry);
@@ -471,8 +474,8 @@
         const cur = currentCommit(app, histories);
         return h('tr', {key},
             h('td', {style: cellStyle, title: key}, h('a', {href: `/applications/${key}`}, app.metadata.name)),
-            h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
-            h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
+            h('td', {style: cellStyle}, h(Badge, {text: app.status && app.status.sync && app.status.sync.status})),
+            h('td', {style: cellStyle}, h(Badge, {text: app.status && app.status.health && app.status.health.status})),
             h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
             h('td', {style: monoCell, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
             h('td', {style: cellStyle, title: res ? res.message : ''}, res && h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : ''))
@@ -540,7 +543,7 @@
                 if (id !== loadId.current) return;
                 setApps(items);
                 setResolving(true);
-                const resolved = await resolveAppHistories(items);
+                const resolved = await resolveAppHistories(items, () => id !== loadId.current);
                 if (id === loadId.current) setHistories(resolved);
             } catch (e) {
                 if (id === loadId.current) setError(e.message);
@@ -558,6 +561,7 @@
             setResults({});
             setTargetCommit('');
             loadApps();
+            return () => { loadId.current++; };
         }, [scopeKey, branch]);
 
         React.useEffect(() => {
@@ -763,6 +767,7 @@
         const [indexError, setIndexError] = React.useState(null);
         const [scopeKey, setScopeKey] = React.useState('');
         const [branch, setBranch] = React.useState('');
+        const [notice, setNotice] = React.useState('');
         const [open, setOpen] = React.useState({});
         const [busyBranches, setBusyBranches] = React.useState({});
 
@@ -770,17 +775,19 @@
             listApps(null, INDEX_FIELDS).then(items => {
                 const idx = buildIndex(items);
                 const params = readParams();
-                const scope = scopeFromParams(idx, params);
+                const {scope, notice: scopeNotice} = scopeFromParams(idx, params);
                 const br = params.get('branch');
+                const branchOk = !br || (scope && idx[scope][br]);
                 setIndex(idx);
                 setScopeKey(scope);
-                setBranch(scope && br && idx[scope][br] ? br : '');
+                setBranch(scope && branchOk ? br || '' : '');
+                setNotice(scopeNotice || (scope && !branchOk ? `Branch ${br} not found in ${nsKeyLabel(scope)}.` : ''));
             }).catch(e => setIndexError(e.message));
         }, []);
 
         React.useEffect(() => {
-            if (index) writeParams({...scopeParams(scopeKey), branch});
-        }, [index, scopeKey, branch]);
+            if (index && !notice) writeParams({...scopeParams(scopeKey), branch});
+        }, [index, scopeKey, branch, notice]);
 
         const counts = (index && index[scopeKey]) || {};
         const scopes = index ? Object.keys(index).sort((a, b) => nsKeyLabel(a).localeCompare(nsKeyLabel(b))) : [];
@@ -796,17 +803,18 @@
 
         return h('div', {style: {padding: '24px 16px', maxWidth: '1400px', boxSizing: 'border-box'}},
             indexError && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, indexError),
+            notice && h('div', {style: {color: 'var(--ext-muted)', marginBottom: '12px'}}, h('i', {className: 'fa fa-exclamation-triangle'}), ` ${notice}`),
             h('div', {style: {display: 'flex', gap: '16px 24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
                 h('div', {style: {maxWidth: '100%'}},
                     h('div', {style: labelStyle}, 'Namespace'),
-                    h('select', {style: selectStyle, value: scopeKey, disabled: !index || busy, onChange: e => { setScopeKey(e.target.value); setBranch(''); }},
+                    h('select', {style: selectStyle, value: scopeKey, disabled: !index || busy, onChange: e => { setNotice(''); setScopeKey(e.target.value); setBranch(''); }},
                         h('option', {value: ''}, index ? 'Select namespace' : 'Loading...'),
                         scopes.map(key => h('option', {key, value: key}, nsKeyLabel(key)))
                     )
                 ),
                 h('div', {style: {maxWidth: '100%'}},
                     h('div', {style: labelStyle}, 'Branch'),
-                    h('select', {style: selectStyle, value: branch, disabled: !scopeKey || busy, onChange: e => setBranch(e.target.value)},
+                    h('select', {style: selectStyle, value: branch, disabled: !scopeKey || busy, onChange: e => { setNotice(''); setBranch(e.target.value); }},
                         h('option', {value: ''}, scopeKey ? `All branches (${branches.length})` : 'All branches'),
                         branches.map(br => h('option', {key: br, value: br}, `${branchLabel(br)} (${counts[br]})`))
                     )

@@ -50,14 +50,31 @@
     async function callRollback(application, id) {
         const appName = application.metadata.name;
         const appNamespace = application.metadata.namespace;
+        const appUrl = `/api/v1/applications/${encodeURIComponent(appName)}`;
+        const automatedOf = app => (app && app.spec.syncPolicy && app.spec.syncPolicy.automated) || null;
+        const fetchApp = () => apiRequest('GET', `${appUrl}?appNamespace=${encodeURIComponent(appNamespace)}`);
+        const patchAutomated = automated => apiRequest('PATCH', appUrl, {
+            name: appName, appNamespace, patchType: 'merge', patch: JSON.stringify({spec: {syncPolicy: {automated}}})
+        });
+        const post = () => apiRequest('POST', `${appUrl}/rollback`, {id, appNamespace});
 
-        if (application.spec.syncPolicy && application.spec.syncPolicy.automated) {
-            await apiRequest('PATCH', `/api/v1/applications/${encodeURIComponent(appName)}`, {
-                name: appName, appNamespace, patchType: 'merge', patch: JSON.stringify({spec: {syncPolicy: {automated: null}}})
-            });
+        const previous = automatedOf(await fetchApp());
+        if (previous) await patchAutomated(null);
+        try {
+            try {
+                await post();
+            } catch (e) {
+                if (!(previous && /auto-sync|automated/i.test(e.message))) throw e;
+                await new Promise(r => setTimeout(r, 2000));
+                await post();
+            }
+        } catch (e) {
+            if (previous) {
+                const fresh = await fetchApp().catch(() => null);
+                if (fresh && !automatedOf(fresh)) await patchAutomated(previous).catch(() => {});
+            }
+            throw e;
         }
-
-        await apiRequest('POST', `/api/v1/applications/${encodeURIComponent(appName)}/rollback`, {id, appNamespace});
     }
 
     // Confirmation modal — reuses ArgoCD's popup CSS classes for identical look
