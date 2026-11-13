@@ -274,50 +274,37 @@
         );
     };
 
-    const BulkOpsPage = () => {
-        const [index, setIndex] = React.useState(null);
-        const [indexError, setIndexError] = React.useState(null);
-        const [namespace, setNamespace] = React.useState('');
-        const [branch, setBranch] = React.useState('');
+    const BranchSection = ({namespace, branch, onBusy}) => {
         const [apps, setApps] = React.useState([]);
         const [histories, setHistories] = React.useState({});
         const [loading, setLoading] = React.useState(false);
         const [resolving, setResolving] = React.useState(false);
+        const [error, setError] = React.useState(null);
         const [results, setResults] = React.useState({});
         const [busy, setBusy] = React.useState(false);
         const [targetCommit, setTargetCommit] = React.useState('');
         const [enableAutoSync, setEnableAutoSync] = React.useState(true);
         const [confirm, setConfirm] = React.useState(null);
+        const loadId = React.useRef(0);
 
-        React.useEffect(() => {
-            listApps(null, ['items.metadata.name', 'items.metadata.labels', 'items.spec.destination']).then(items => {
-                const idx = {};
-                items.forEach(a => {
-                    const ns = destNs(a);
-                    const br = branchOf(a);
-                    if (!ns || !br) return;
-                    idx[ns] = idx[ns] || {};
-                    idx[ns][br] = (idx[ns][br] || 0) + 1;
-                });
-                setIndex(idx);
-            }).catch(e => setIndexError(e.message));
-        }, []);
-
-        const loadApps = async (ns, br, withHistory) => {
-            if (!ns || !br) return;
+        const loadApps = async () => {
+            const id = ++loadId.current;
             setLoading(true);
+            setError(null);
             try {
-                const items = (await listApps(`branch=${br}`)).filter(a => destNs(a) === ns).sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
+                const items = (await listApps(`branch=${branch}`)).filter(a => destNs(a) === namespace).sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
+                if (id !== loadId.current) return;
                 setApps(items);
-                if (withHistory) {
-                    setResolving(true);
-                    setHistories(await resolveAppHistories(items));
+                setResolving(true);
+                const resolved = await resolveAppHistories(items);
+                if (id === loadId.current) setHistories(resolved);
+            } catch (e) {
+                if (id === loadId.current) setError(e.message);
+            } finally {
+                if (id === loadId.current) {
+                    setLoading(false);
                     setResolving(false);
                 }
-            } catch (e) {
-                setIndexError(e.message);
-            } finally {
-                setLoading(false);
             }
         };
 
@@ -326,8 +313,12 @@
             setHistories({});
             setResults({});
             setTargetCommit('');
-            loadApps(namespace, branch, true);
+            loadApps();
         }, [namespace, branch]);
+
+        React.useEffect(() => {
+            if (onBusy) onBusy(branch, busy);
+        }, [busy]);
 
         const setResult = (name, status, message) => setResults(r => ({...r, [name]: {status, message}}));
 
@@ -343,12 +334,12 @@
                 }
             });
             setBusy(false);
-            loadApps(namespace, branch, true);
+            loadApps();
         };
 
         const targets = React.useMemo(() => rollbackTargets(apps, histories), [apps, histories]);
-        const environments = Array.from(new Set(apps.map(a => (a.metadata.labels || {}).environment).filter(Boolean)));
-        const isProd = environments.includes('prod');
+        const isProd = apps.some(a => (a.metadata.labels || {}).environment === 'prod');
+        const scope = `Namespace ${namespace}, branch ${branch}.`;
 
         const planRollback = () => {
             const plan = [];
@@ -365,7 +356,7 @@
         const onSyncAll = () => setConfirm({
             title: `Sync ${apps.length} application(s)`,
             lines: [
-                `Namespace ${namespace}, branch ${branch}. Each app will sync to the latest revision in git (latest CI build for the branch).`,
+                `${scope} Each app will sync to the latest revision in git (latest CI build for the branch).`,
                 enableAutoSync ? 'Auto-sync will be re-enabled on every app.' : 'Auto-sync settings are left unchanged.'
             ],
             apps: apps.map(a => a.metadata.name),
@@ -376,7 +367,7 @@
         const onRestartAll = () => setConfirm({
             title: `Restart ${apps.length} application(s)`,
             lines: [
-                `Namespace ${namespace}, branch ${branch}. Runs the ArgoCD "restart" action on every Deployment, StatefulSet, DaemonSet and Argo Rollout in each app.`,
+                `${scope} Runs the ArgoCD "restart" action on every Deployment, StatefulSet, DaemonSet and Argo Rollout in each app.`,
                 'Deployments do a rolling restart; Rollouts restart pods via spec.restartAt, respecting maxUnavailable. Deployments referenced by a Rollout workloadRef are left alone. No git or image change.'
             ],
             apps: apps.map(a => a.metadata.name),
@@ -391,7 +382,7 @@
             setConfirm({
                 title: `Rollback ${plan.length} application(s) to ${shortSha(targetCommit)}`,
                 lines: [
-                    `Namespace ${namespace}, branch ${branch}. Auto-sync will be disabled on each app before rollback.`,
+                    `${scope} Auto-sync will be disabled on each app before rollback.`,
                     'This does not change launchpad. Syncing or re-enabling auto-sync later redeploys the latest build; revert _live_build.yml for a permanent rollback.',
                     skipped.length ? `${skipped.length} app(s) skipped (see table).` : ''
                 ].filter(Boolean),
@@ -401,36 +392,14 @@
             });
         };
 
-        const namespaces = index ? Object.keys(index).sort() : [];
-        const branches = index && namespace ? Object.keys(index[namespace] || {}).sort() : [];
-
-        return h('div', {style: {padding: '24px 16px', maxWidth: '1400px', boxSizing: 'border-box'}},
+        return h('div', null,
             confirm && h(ConfirmModal, {
                 title: confirm.title, lines: confirm.lines, apps: confirm.apps, requireText: confirm.requireText,
                 onCancel: () => setConfirm(null),
                 onConfirm: () => { const run = confirm.run; setConfirm(null); run(); }
             }),
-            indexError && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, indexError),
-            h('div', {style: {display: 'flex', gap: '16px 24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
-                h('div', {style: {maxWidth: '100%'}},
-                    h('div', {style: labelStyle}, 'Namespace'),
-                    h('select', {style: selectStyle, value: namespace, disabled: !index || busy, onChange: e => { setNamespace(e.target.value); setBranch(''); }},
-                        h('option', {value: ''}, index ? 'Select namespace' : 'Loading...'),
-                        namespaces.map(ns => h('option', {key: ns, value: ns}, ns))
-                    )
-                ),
-                h('div', {style: {maxWidth: '100%'}},
-                    h('div', {style: labelStyle}, 'Branch'),
-                    h('select', {style: selectStyle, value: branch, disabled: !namespace || busy, onChange: e => setBranch(e.target.value)},
-                        h('option', {value: ''}, 'Select branch'),
-                        branches.map(br => h('option', {key: br, value: br}, `${br} (${index[namespace][br]})`))
-                    )
-                ),
-                h('button', {className: 'argo-button argo-button--base-o', style: buttonStyle, disabled: !branch || loading || busy, onClick: () => loadApps(namespace, branch, true)},
-                    h('i', {className: 'fa fa-redo'}), ' Refresh')
-            ),
-
-            branch && h('div', {style: {display: 'flex', gap: '12px 24px', marginBottom: '20px', flexWrap: 'wrap', alignItems: 'center'}},
+            error && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, error),
+            h('div', {style: {display: 'flex', gap: '12px 24px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center'}},
                 h('div', {style: {display: 'flex', gap: '12px', alignItems: 'center'}},
                     h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || loading || apps.length === 0, onClick: onSyncAll},
                         h('i', {className: 'fa fa-sync'}), ' Sync all'),
@@ -441,29 +410,33 @@
                 h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || loading || apps.length === 0, onClick: onRestartAll},
                     h('i', {className: 'fa fa-redo-alt'}), ' Restart all'),
                 h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: busy || !targetCommit, onClick: onRollbackAll, title: targetCommit ? '' : 'Select a build in Rollback history below'},
-                    h('i', {className: 'fa fa-step-backward'}), targetCommit ? ` Rollback all to ${shortSha(targetCommit)}` : ' Rollback all')
+                    h('i', {className: 'fa fa-step-backward'}), targetCommit ? ` Rollback all to ${shortSha(targetCommit)}` : ' Rollback all'),
+                h('button', {className: 'argo-button argo-button--base-o', style: {...buttonStyle, marginLeft: 'auto'}, disabled: loading || busy, onClick: loadApps},
+                    h('i', {className: loading ? 'fa fa-spinner fa-spin' : 'fa fa-redo'}), ' Refresh')
             ),
 
             loading && apps.length === 0
                 ? h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...')
-                : apps.length > 0 && h(Table, {columns: [
-                    {label: 'Application', width: '30%'}, {label: 'Sync', width: '110px'}, {label: 'Health', width: '120px'},
-                    {label: 'Auto-sync', width: '90px'}, {label: 'Build commit', width: '120px'}, {label: 'Result', width: '30%'}
-                ]}, apps.map(app => {
-                    const name = app.metadata.name;
-                    const res = results[name];
-                    const cur = currentCommit(app, histories);
-                    return h('tr', {key: name},
-                        h('td', {style: cellStyle, title: name}, h('a', {href: `/applications/${app.metadata.namespace}/${name}`}, name)),
-                        h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
-                        h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
-                        h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
-                        h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
-                        h('td', {style: cellStyle, title: res && res.message ? res.message : ''}, res ? h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : '') : '')
-                    );
-                })),
+                : !error && apps.length === 0
+                    ? h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'No applications.')
+                    : apps.length > 0 && h(Table, {columns: [
+                        {label: 'Application', width: '30%'}, {label: 'Sync', width: '110px'}, {label: 'Health', width: '120px'},
+                        {label: 'Auto-sync', width: '90px'}, {label: 'Build commit', width: '120px'}, {label: 'Result', width: '30%'}
+                    ]}, apps.map(app => {
+                        const name = app.metadata.name;
+                        const res = results[name];
+                        const cur = currentCommit(app, histories);
+                        return h('tr', {key: name},
+                            h('td', {style: cellStyle, title: name}, h('a', {href: `/applications/${app.metadata.namespace}/${name}`}, name)),
+                            h('td', {style: cellStyle}, h(Badge, {text: app.status.sync && app.status.sync.status})),
+                            h('td', {style: cellStyle}, h(Badge, {text: app.status.health && app.status.health.status})),
+                            h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
+                            h('td', {style: {...cellStyle, fontFamily: 'monospace'}, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
+                            h('td', {style: cellStyle, title: res && res.message ? res.message : ''}, res ? h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : '') : '')
+                        );
+                    })),
 
-            branch && apps.length > 0 && h('div', null,
+            apps.length > 0 && h('div', null,
                 h('div', {style: sectionTitleStyle}, 'Rollback history', resolving && h('span', {style: {textTransform: 'none', fontWeight: 400, marginLeft: '8px'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' resolving build commits...')),
                 !resolving && targets.length === 0
                     ? h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'No build commits found in app history.')
@@ -496,7 +469,98 @@
         );
     };
 
-    const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(BulkOpsPage, 'Bulk Ops', '/bulk-ops', 'fa-layer-group fa-fw');
+    const BulkSyncPage = () => {
+        const [index, setIndex] = React.useState(null);
+        const [indexError, setIndexError] = React.useState(null);
+        const [namespace, setNamespace] = React.useState('');
+        const [branch, setBranch] = React.useState('');
+        const [open, setOpen] = React.useState({});
+        const [busyBranches, setBusyBranches] = React.useState({});
+
+        React.useEffect(() => {
+            listApps(null, ['items.metadata.name', 'items.metadata.labels', 'items.spec.destination']).then(items => {
+                const idx = {};
+                items.forEach(a => {
+                    const ns = destNs(a);
+                    const br = branchOf(a);
+                    if (!ns || !br) return;
+                    idx[ns] = idx[ns] || {};
+                    idx[ns][br] = (idx[ns][br] || 0) + 1;
+                });
+                setIndex(idx);
+            }).catch(e => setIndexError(e.message));
+        }, []);
+
+        const namespaces = index ? Object.keys(index).sort() : [];
+        const branches = index && namespace ? Object.keys(index[namespace] || {}).sort() : [];
+        const busy = Object.values(busyBranches).some(Boolean);
+        const onBusy = React.useCallback((br, value) => setBusyBranches(m => ({...m, [br]: value})), []);
+
+        React.useEffect(() => {
+            setBusyBranches({});
+            setOpen(branches.length === 1 ? {[branches[0]]: true} : {});
+        }, [namespace, index]);
+
+        const toggle = br => setOpen(o => ({...o, [br]: !o[br]}));
+
+        return h('div', {style: {padding: '24px 16px', maxWidth: '1400px', boxSizing: 'border-box'}},
+            indexError && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, indexError),
+            h('div', {style: {display: 'flex', gap: '16px 24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
+                h('div', {style: {maxWidth: '100%'}},
+                    h('div', {style: labelStyle}, 'Namespace'),
+                    h('select', {style: selectStyle, value: namespace, disabled: !index || busy, onChange: e => { setNamespace(e.target.value); setBranch(''); }},
+                        h('option', {value: ''}, index ? 'Select namespace' : 'Loading...'),
+                        namespaces.map(ns => h('option', {key: ns, value: ns}, ns))
+                    )
+                ),
+                h('div', {style: {maxWidth: '100%'}},
+                    h('div', {style: labelStyle}, 'Branch'),
+                    h('select', {style: selectStyle, value: branch, disabled: !namespace || busy, onChange: e => setBranch(e.target.value)},
+                        h('option', {value: ''}, namespace ? `All branches (${branches.length})` : 'All branches'),
+                        branches.map(br => h('option', {key: br, value: br}, `${br} (${index[namespace][br]})`))
+                    )
+                )
+            ),
+
+            index && !namespace && h('div', {style: {color: '#6d7f8b', fontSize: '13px'}}, 'Select a namespace to see its branches.'),
+
+            namespace && branch && h(BranchSection, {key: `${namespace}/${branch}`, namespace, branch, onBusy}),
+
+            namespace && !branch && branches.map(br => {
+                const isOpen = !!open[br];
+                const mounted = br in open;
+                return h('div', {key: `${namespace}/${br}`, style: {background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)', marginBottom: '12px'}},
+                    h('div', {onClick: () => toggle(br), style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', cursor: 'pointer', userSelect: 'none'}},
+                        h('i', {className: `fa fa-fw fa-chevron-${isOpen ? 'down' : 'right'}`, style: {color: '#6d7f8b'}}),
+                        h('strong', null, br),
+                        h('span', {style: {color: '#6d7f8b', fontSize: '13px'}}, `${index[namespace][br]} app${index[namespace][br] === 1 ? '' : 's'}`),
+                        busyBranches[br] && h('i', {className: 'fa fa-spinner fa-spin', style: {color: '#0dadea'}})
+                    ),
+                    mounted && h('div', {style: {display: isOpen ? 'block' : 'none', padding: '16px', borderTop: '1px solid #eff3f5', background: '#f8fbfb'}},
+                        h(BranchSection, {namespace, branch: br, onBusy}))
+                );
+            })
+        );
+    };
+
+    const describeSidebarItem = (title, description) => {
+        const attach = el => {
+            if (el.dataset.extDescription || el.textContent !== title) return;
+            el.dataset.extDescription = '1';
+            const d = document.createElement('div');
+            d.textContent = description;
+            d.style.cssText = 'font-size:12px;font-weight:400;opacity:0.8;margin-top:4px;max-width:240px;white-space:normal;line-height:1.4';
+            el.appendChild(d);
+        };
+        new MutationObserver(mutations => mutations.forEach(m => m.addedNodes.forEach(n => {
+            if (n.nodeType !== 1) return;
+            if (n.classList.contains('sidebar__tooltip')) attach(n);
+            else if (n.matches('[data-tippy-root], .tippy-popper')) n.querySelectorAll('.sidebar__tooltip').forEach(attach);
+        }))).observe(document.body, {childList: true, subtree: true});
+    };
+
+    const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(BulkSyncPage, 'Bulk Sync', '/bulk-sync', 'fa-layer-group fa-fw');
+    describeSidebarItem('Bulk Sync', 'Sync, restart or roll back every app of a namespace together, branch by branch.');
     const appRoot = document.getElementById('app');
     if (!appRoot || appRoot.childElementCount) {
         registerPage();

@@ -7,7 +7,7 @@ Custom UI extensions for ArgoCD.
 | Extension | Description |
 |-----------|-------------|
 | [Rollback](resources/extension-Rollback.js/extensions-Rollback.js) | Adds a Rollback button to the application top bar with a deployment history flyout showing commit, deployer, and one-click rollback |
-| [BulkOps](resources/extension-BulkOps.js/extensions-BulkOps.js) | Adds a "Bulk Ops" sidebar page: pick a destination namespace and `branch` label, then sync all matching apps (optionally re-enabling auto-sync), restart all their Deployments and Argo Rollouts, or roll them all back to a chosen `build.commit` |
+| [BulkOps](resources/extension-BulkOps.js/extensions-BulkOps.js) | Adds a "Bulk Sync" sidebar page: pick a destination namespace (and optionally a `branch` label; otherwise each branch gets its own collapsible section), then sync all matching apps (optionally re-enabling auto-sync), restart all their Deployments and Argo Rollouts, or roll them all back to a chosen `build.commit` |
 | [CommitDetails](resources/extension-CommitDetails.js/extensions-CommitDetails.js) | Replaces the launchpad Author/Comment in SYNC STATUS and LAST SYNC panels with actual service commit SHA and slackUsername from _live_build.yml |
 
 ---
