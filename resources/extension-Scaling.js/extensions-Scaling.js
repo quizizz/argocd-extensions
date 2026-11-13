@@ -1,5 +1,11 @@
 ((window) => {
     const h = React.createElement;
+    if (!document.getElementById('ext-theme-vars')) {
+        const themeStyle = document.createElement('style');
+        themeStyle.id = 'ext-theme-vars';
+        themeStyle.textContent = ':root{--ext-surface:#fff;--ext-surface-2:#f8fbfb;--ext-border:#eff3f5;--ext-border-strong:#dee6eb;--ext-text:#363c4a;--ext-strong:#364150;--ext-muted:#6d7f8b;--ext-selected:#e6f7fc;--ext-shadow:rgba(0,0,0,0.1);--ext-hover:rgba(0,0,0,0.08);--ext-active:rgba(0,0,0,0.15)}.theme-dark{--ext-surface:#303237;--ext-surface-2:#28292a;--ext-border:#495763;--ext-border-strong:#6d7f8b;--ext-text:#fff;--ext-strong:#dee6eb;--ext-muted:#a5b5c0;--ext-selected:#004c67;--ext-shadow:rgba(0,0,0,0.5);--ext-hover:rgba(255,255,255,0.08);--ext-active:rgba(255,255,255,0.15)}';
+        document.head.appendChild(themeStyle);
+    }
     const CONCURRENCY = 5;
     const ALL_BRANCHES = '*';
 
@@ -76,7 +82,7 @@
         const hpas = nodes.filter(n => n.kind === 'HorizontalPodAutoscaler');
         const pairs = sos.map(so => ({so, hpa: hpaForSo(hpas, so)}));
         const plainHpas = hpas.filter(n => !hasSoParent(n) && !pairs.some(p => p.hpa === n));
-        const workloads = nodes.filter(n => WORKLOAD_KINDS[n.kind] === n.group);
+        const workloads = nodes.filter(n => Object.prototype.hasOwnProperty.call(WORKLOAD_KINDS, n.kind) && WORKLOAD_KINDS[n.kind] === n.group);
         return {pairs, plainHpas, workloads};
     }
 
@@ -317,10 +323,10 @@
         return summaries.filter(s => matches(s) && inNs(s));
     }
 
-    const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
-    const selectStyle = {minWidth: '240px', height: '34px', padding: '0 36px 0 12px', border: '1px solid #dee6eb', borderRadius: '4px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px #fff", appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', fontSize: '14px', cursor: 'pointer'};
-    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid #eff3f5', fontSize: '13px', verticalAlign: 'top'};
-    const tableStyle = {width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)'};
+    const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-muted)', marginBottom: '4px'};
+    const selectStyle = {minWidth: '240px', height: '34px', padding: '0 36px 0 12px', border: '1px solid var(--ext-border-strong)', borderRadius: '4px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px var(--ext-surface)", color: 'var(--ext-text)', appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', fontSize: '14px', cursor: 'pointer'};
+    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid var(--ext-border)', fontSize: '13px', verticalAlign: 'top'};
+    const tableStyle = {width: '100%', borderCollapse: 'collapse', background: 'var(--ext-surface)', color: 'var(--ext-text)', borderRadius: '4px', boxShadow: '1px 2px 3px var(--ext-shadow)'};
 
     const stateColor = state => {
         const base = String(state).replace(' !', '');
@@ -336,7 +342,7 @@
         const pct = Math.min(100, Math.round((current / max) * 100));
         const minPct = Math.min(100, Math.round((min / max) * 100));
         const color = pct >= 100 ? '#e96d76' : pct >= 80 ? '#f4c030' : '#18be94';
-        return h('div', {title: `${current} / ${max} (${pct}%)`, style: {position: 'relative', width: '140px', height: '10px', background: '#eff3f5', borderRadius: '5px', marginTop: '4px'}},
+        return h('div', {title: `${current} / ${max} (${pct}%)`, style: {position: 'relative', width: '140px', height: '10px', background: 'var(--ext-border)', borderRadius: '5px', marginTop: '4px'}},
             h('div', {style: {width: `${pct}%`, height: '100%', background: color, borderRadius: '5px'}}),
             h('div', {style: {position: 'absolute', left: `${minPct}%`, top: '-2px', width: '2px', height: '14px', background: '#6d7f8b'}})
         );
@@ -348,7 +354,7 @@
         h('div', {key: i, style: {whiteSpace: 'nowrap'}}, `${t.label}: `, h('strong', null, t.current), ` / ${t.target}`)));
 
     const ScalingCard = ({summary}) => {
-        if (!summary) return h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading scaling...');
+        if (!summary) return h('div', {style: {color: 'var(--ext-muted)'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading scaling...');
         const s = summary;
         const stat = (label, value) => h('div', {style: {marginRight: '32px'}}, h('div', {style: labelStyle}, label), h('div', {style: {fontSize: '22px'}}, value === null || value === undefined ? '-' : value));
         return h('div', null,
@@ -369,7 +375,7 @@
                 h('div', {style: labelStyle}, 'Cron windows'),
                 s.crons.map((c, i) => h('div', {key: i, style: {fontFamily: 'monospace', fontSize: '12px'}}, fmtCron(c)))
             ),
-            s.hpaName && h('div', {style: {color: '#6d7f8b', fontSize: '12px', marginTop: '12px'}}, `HPA: ${s.hpaName}`)
+            s.hpaName && h('div', {style: {color: 'var(--ext-muted)', fontSize: '12px', marginTop: '12px'}}, `HPA: ${s.hpaName}`)
         );
     };
 
@@ -391,7 +397,7 @@
         }, [application && application.metadata.name, resource && resource.kind, md.namespace, md.name, refresh]);
         const body = error ? h('div', {style: {color: '#e96d76'}}, error)
             : !summaries ? h(ScalingCard, {summary: null})
-                : !summaries.length ? h('div', {style: {color: '#6d7f8b'}}, 'No autoscaling configured for this resource.')
+                : !summaries.length ? h('div', {style: {color: 'var(--ext-muted)'}}, 'No autoscaling configured for this resource.')
                     : summaries.map((s, i) => h('div', {key: i, style: {marginBottom: '24px'}},
                         summaries.length > 1 && h('div', {style: labelStyle}, `${s.kind} ${s.name}`),
                         h(ScalingCard, {summary: s})));
@@ -425,7 +431,7 @@
         return entries.map((s, i) => h('tr', {key: `${appKey(app)}#${i}`},
             h('td', {style: cellStyle},
                 h('a', {href: `/applications/${app.metadata.namespace}/${name}`}, name),
-                s && s.target && h('div', {style: {color: '#6d7f8b', fontSize: '11px'}}, `${s.kind === 'KEDA' || s.kind === 'HPA' ? `${s.kind} → ` : ''}${s.target}`)),
+                s && s.target && h('div', {style: {color: 'var(--ext-muted)', fontSize: '11px'}}, `${s.kind === 'KEDA' || s.kind === 'HPA' ? `${s.kind} → ` : ''}${s.target}`)),
             h('td', {style: cellStyle}, branchOf(app)),
             h('td', {style: cellStyle}, s ? dash(s.min) : '...'),
             h('td', {style: {...cellStyle, fontWeight: 600}}, s ? dash(s.current) : '...'),
@@ -523,11 +529,11 @@
                 ),
                 h('button', {className: 'argo-button argo-button--base-o', disabled: !namespace || loading, onClick: () => load(namespace, branch)},
                     h('i', {className: loading ? 'fa fa-spinner fa-spin' : 'fa fa-redo'}), ' Refresh'),
-                namespace && h('label', {style: {fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px'}},
+                namespace && h('label', {style: {fontSize: '13px', color: 'var(--ext-text)', display: 'flex', alignItems: 'center', gap: '6px'}},
                     h('input', {type: 'checkbox', checked: onlyCapped, onChange: e => setOnlyCapped(e.target.checked)}),
                     `Only at max (${cappedCount})`)
             ),
-            namespace && apps.length === 0 && loading && h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...'),
+            namespace && apps.length === 0 && loading && h('div', {style: {color: 'var(--ext-muted)'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...'),
             rows.length > 0 && h('table', {style: tableStyle},
                 h('thead', null, h('tr', null,
                     ['Application', 'Branch', 'Min', 'Current', 'Desired', 'Max', 'Usage', 'Triggers (current / target)', 'Cron windows', 'State'].map(c =>
