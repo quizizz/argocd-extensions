@@ -185,7 +185,7 @@
     }
 
     const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
-    const selectStyle = {minWidth: '240px', height: '34px', padding: '0 8px', border: '1px solid #dee6eb', borderRadius: '4px', background: '#fff', fontSize: '14px'};
+    const selectStyle = {minWidth: '240px', height: '34px', padding: '0 36px 0 12px', border: '1px solid #dee6eb', borderRadius: '4px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px #fff", appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', fontSize: '14px', cursor: 'pointer'};
     const cellStyle = {padding: '8px 12px', borderBottom: '1px solid #eff3f5', fontSize: '13px', verticalAlign: 'top'};
     const tableStyle = {width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)'};
 
@@ -372,6 +372,16 @@
         );
     };
 
-    window.extensionsAPI.registerSystemLevelExtension(ScalingPage, 'Scaling', '/scaling', 'fa-expand-arrows-alt');
+    const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(ScalingPage, 'Scaling', '/scaling', 'fa-expand-arrows-alt fa-fw');
+    const appRoot = document.getElementById('app');
+    if (!appRoot || appRoot.childElementCount) {
+        registerPage();
+    } else {
+        new MutationObserver((_, observer) => {
+            if (!appRoot.childElementCount) return;
+            observer.disconnect();
+            registerPage();
+        }).observe(appRoot, {childList: true});
+    }
     window.extensionsAPI.registerResourceExtension(ScaledObjectTab, 'keda.sh', 'ScaledObject', 'Scaling', {icon: 'fa fa-expand-arrows-alt'});
 })(window);
