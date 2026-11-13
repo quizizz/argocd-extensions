@@ -255,6 +255,12 @@
     };
 
     const describeSidebarItem = (title, description) => {
+        if (!document.getElementById('ext-nav-icon-style')) {
+            const style = document.createElement('style');
+            style.id = 'ext-nav-icon-style';
+            style.textContent = '.sidebar__nav-item i.fa.ext-nav-icon{margin:0 19px 0 0;padding-right:0;width:26px;display:inline-block;vertical-align:middle;line-height:1;text-align:center}.sidebar--collapsed .sidebar__nav-item i.fa.ext-nav-icon{margin-left:7px}';
+            document.head.appendChild(style);
+        }
         const attach = el => {
             if (el.dataset.extDescription || el.textContent !== title) return;
             el.dataset.extDescription = '1';
@@ -270,7 +276,7 @@
         }))).observe(document.body, {childList: true, subtree: true});
     };
 
-    const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(PinnedPage, 'Pinned', '/pinned', 'fa-thumbtack fa-fw');
+    const registerPage = () => window.extensionsAPI.registerSystemLevelExtension(PinnedPage, 'Pinned', '/pinned', 'fa-thumbtack fa-fw ext-nav-icon');
     describeSidebarItem('Pinned', 'Quick view of the namespaces and apps you pinned, with live sync and health. Saved in this browser.');
     const appRoot = document.getElementById('app');
     if (!appRoot || appRoot.childElementCount) {
