@@ -40,9 +40,29 @@
     const appKey = app => `${app.metadata.namespace}/${app.metadata.name}`;
     const destNs = app => (app.spec && app.spec.destination && app.spec.destination.namespace) || '';
     const branchOf = app => (app.metadata.labels && app.metadata.labels.branch) || '';
-    const pageHref = (path, ns, br) => `${path}?${new URLSearchParams(br ? {namespace: ns, branch: br} : {namespace: ns})}`;
-    const bulkOpsHref = (ns, br) => pageHref('/bulk-sync', ns, br);
-    const scalingHref = (ns, br) => pageHref('/scaling', ns, br);
+    const IN_CLUSTER = new Set(['', 'in-cluster', 'https://kubernetes.default.svc']);
+    const destCluster = app => {
+        const d = (app.spec && app.spec.destination) || {};
+        return d.name || d.server || '';
+    };
+    const nsPinId = app => (IN_CLUSTER.has(destCluster(app)) ? destNs(app) : `${destCluster(app)}|${destNs(app)}`);
+    const splitPinId = id => {
+        const i = id.lastIndexOf('|');
+        return i < 0 ? {cluster: '', ns: id} : {cluster: id.slice(0, i), ns: id.slice(i + 1)};
+    };
+    const pinLabel = id => {
+        const {cluster, ns} = splitPinId(id);
+        return cluster ? `${ns} (${cluster})` : ns;
+    };
+    const pageHref = (path, id, br) => {
+        const {cluster, ns} = splitPinId(id);
+        const params = new URLSearchParams({namespace: ns});
+        if (cluster) params.set('cluster', cluster);
+        if (br) params.set('branch', br);
+        return `${path}?${params}`;
+    };
+    const bulkOpsHref = (id, br) => pageHref('/bulk-sync', id, br);
+    const scalingHref = (id, br) => pageHref('/scaling', id, br);
     const isAutoSync = app => !!(app.spec && app.spec.syncPolicy && app.spec.syncPolicy.automated);
     const syncStatus = app => app.status && app.status.sync && app.status.sync.status;
     const healthStatus = app => app.status && app.status.health && app.status.health.status;
@@ -120,13 +140,13 @@
                 h('thead', null, h('tr', null, columns.map((c, i) => h('th', {key: i, style: {...cellStyle, ...labelStyle, textAlign: 'left'}}, c.label)))),
                 h('tbody', null, rows.map(row => {
                     const app = row.app;
-                    const ns = app ? destNs(app) : '';
+                    const ns = app && destNs(app) ? nsPinId(app) : '';
                     const br = app ? branchOf(app) : '';
                     return h('tr', {key: row.key},
                         h('td', {style: {...cellStyle, padding: '4px 6px'}}, h(PinButton, {pinned: pinnedApps.has(row.key), label: row.name, onClick: () => onToggleApp(row.key)})),
                         h('td', {style: cellStyle, title: row.name}, app ? h('a', {href: `/applications/${app.metadata.namespace}/${app.metadata.name}`}, row.name) : row.name),
-                        showNamespace && h('td', {style: cellStyle, title: ns}, ns ? h('a', {href: bulkOpsHref(ns), title: `Open ${ns} in Bulk Sync`}, ns) : '-'),
-                        h('td', {style: cellStyle, title: br}, ns && br ? h('a', {href: bulkOpsHref(ns, br), title: `Open ${ns} / ${br} in Bulk Sync`}, br) : br || '-'),
+                        showNamespace && h('td', {style: cellStyle, title: pinLabel(ns)}, ns ? h('a', {href: bulkOpsHref(ns), title: `Open ${pinLabel(ns)} in Bulk Sync`}, pinLabel(ns)) : '-'),
+                        h('td', {style: cellStyle, title: br}, ns && br ? h('a', {href: bulkOpsHref(ns, br), title: `Open ${pinLabel(ns)} / ${br} in Bulk Sync`}, br) : br || '-'),
                         h('td', {style: cellStyle}, h(Badge, {text: app ? syncStatus(app) : 'not found'})),
                         h('td', {style: cellStyle}, app ? h(Badge, {text: healthStatus(app)}) : ''),
                         h('td', {style: cellStyle}, app ? (isAutoSync(app) ? 'on' : 'off') : ''),
@@ -208,13 +228,17 @@
         const byNs = {};
         all.forEach(a => {
             byKey[appKey(a)] = a;
-            (byNs[destNs(a)] = byNs[destNs(a)] || []).push(a);
+            if (destNs(a)) (byNs[nsPinId(a)] = byNs[nsPinId(a)] || []).push(a);
         });
-        const namespaceOptions = Object.keys(byNs).filter(Boolean).sort();
+        const namespaceOptions = Object.keys(byNs).sort((a, b) => pinLabel(a).localeCompare(pinLabel(b)));
+        const nsIdByLabel = {};
+        namespaceOptions.forEach(id => { nsIdByLabel[pinLabel(id)] = id; });
         const appOptions = all.map(appKey).sort();
-        const options = kind === 'namespace' ? namespaceOptions : appOptions;
-        const normalized = kind === 'application' && query && !query.includes('/') ? appOptions.find(k => k.endsWith(`/${query}`)) || query : query;
-        const canPin = options.includes(normalized) && !(kind === 'namespace' ? pins.namespaces : pins.apps).includes(normalized);
+        const options = kind === 'namespace' ? namespaceOptions.map(pinLabel) : appOptions;
+        const normalized = kind === 'namespace'
+            ? nsIdByLabel[query] || query
+            : query && !query.includes('/') ? appOptions.find(k => k.endsWith(`/${query}`)) || query : query;
+        const canPin = (kind === 'namespace' ? namespaceOptions : appOptions).includes(normalized) && !(kind === 'namespace' ? pins.namespaces : pins.apps).includes(normalized);
         const pinnedApps = new Set(pins.apps);
 
         const submit = () => {
@@ -265,14 +289,14 @@
                     return h('div', {key: ns, style: cardStyle},
                         h('div', {style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', cursor: 'pointer', userSelect: 'none', borderBottom: collapsed ? 'none' : '1px solid var(--ext-border)'}, onClick: () => toggleCollapsed(ns)},
                             h('i', {className: `fa fa-fw fa-chevron-${collapsed ? 'right' : 'down'}`, style: {color: 'var(--ext-muted)'}}),
-                            h('strong', null, ns),
+                            h('strong', null, pinLabel(ns)),
                             h('span', {style: {color: 'var(--ext-muted)', fontSize: '13px'}}, nsApps.length ? `${nsApps.length} app${nsApps.length === 1 ? '' : 's'}` : 'no apps found'),
                             summarize(nsApps).map(([label, {n, status}]) => h('span', {key: label, style: {fontSize: '12px'}}, h(Badge, {text: `${n} ${label}`, color: statusColor[status]}))),
                             h('span', {style: {marginLeft: 'auto'}, onClick: e => e.stopPropagation()},
-                                h('a', {href: `/applications?namespace=${encodeURIComponent(ns)}`, style: {fontSize: '13px', marginRight: '12px'}}, 'Open in list'),
+                                h('a', {href: `/applications?namespace=${encodeURIComponent(splitPinId(ns).ns)}`, style: {fontSize: '13px', marginRight: '12px'}}, 'Open in list'),
                                 h('a', {href: bulkOpsHref(ns), style: {fontSize: '13px', marginRight: '12px'}}, 'Bulk Sync'),
                                 h('a', {href: scalingHref(ns), style: {fontSize: '13px', marginRight: '8px'}}, 'Scaling'),
-                                h(PinButton, {pinned: true, label: ns, onClick: () => toggleNamespace(ns)}))
+                                h(PinButton, {pinned: true, label: pinLabel(ns), onClick: () => toggleNamespace(ns)}))
                         ),
                         !collapsed && nsApps.length > 0 && h(AppTable, {
                             rows: nsApps.map(a => ({key: appKey(a), name: a.metadata.name, app: a})),
