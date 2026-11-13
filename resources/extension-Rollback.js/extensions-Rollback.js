@@ -10,6 +10,12 @@
  */
 ((window) => {
     const h = React.createElement;
+    if (!document.getElementById('ext-theme-vars')) {
+        const themeStyle = document.createElement('style');
+        themeStyle.id = 'ext-theme-vars';
+        themeStyle.textContent = ':root{--ext-surface:#fff;--ext-surface-2:#f8fbfb;--ext-border:#eff3f5;--ext-border-strong:#dee6eb;--ext-text:#363c4a;--ext-strong:#364150;--ext-muted:#6d7f8b;--ext-selected:#e6f7fc;--ext-shadow:rgba(0,0,0,0.1);--ext-hover:rgba(0,0,0,0.08);--ext-active:rgba(0,0,0,0.15)}.theme-dark{--ext-surface:#303237;--ext-surface-2:#28292a;--ext-border:#495763;--ext-border-strong:#6d7f8b;--ext-text:#fff;--ext-strong:#dee6eb;--ext-muted:#a5b5c0;--ext-selected:#004c67;--ext-shadow:rgba(0,0,0,0.5);--ext-hover:rgba(255,255,255,0.08);--ext-active:rgba(255,255,255,0.15)}';
+        document.head.appendChild(themeStyle);
+    }
 
     // Returns the full commit SHA string for a history entry.
     // Handles both single-source (entry.revision) and multi-source (entry.revisions[]).
@@ -67,7 +73,7 @@
             : h('p', null, `Are you sure you want to rollback application `, boldName, ` to commit `, boldCommit, '?');
         const message = h('div', null,
             baseMessage,
-            !isLatest && autoSync && h('p', {style: {color: '#6d7f8b', marginTop: '4px'}}, 'Note: Auto-Sync will be disabled.')
+            !isLatest && autoSync && h('p', {style: {color: 'var(--ext-muted)', marginTop: '4px'}}, 'Note: Auto-Sync will be disabled.')
         );
 
         return h(
@@ -91,7 +97,7 @@
                             width: '28px',
                             height: '28px',
                             borderRadius: '50%',
-                            background: closeActive ? 'rgba(0,0,0,0.15)' : closeHover ? 'rgba(0,0,0,0.08)' : 'transparent',
+                            background: closeActive ? 'var(--ext-active)' : closeHover ? 'var(--ext-hover)' : 'transparent',
                             transition: 'background 0.15s',
                             position: 'absolute',
                             right: '12px',
@@ -222,12 +228,12 @@
             snackbar && h(Snackbar, {message: snackbar.message, type: snackbar.type, onClose: () => setSnackbar(null)}),
 
             metaLoading
-                ? h('div', {style: {height: 'calc(100vh - 160px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', color: '#6d7f8b'}},
+                ? h('div', {style: {height: 'calc(100vh - 160px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', color: 'var(--ext-muted)'}},
                     h('i', {className: 'fa fa-spinner fa-spin', style: {fontSize: '24px'}}),
                     h('span', {style: {fontSize: '13px'}}, 'Loading deployment history...')
                   )
             : history.length === 0
-                ? h('div', {style: {color: '#888', fontSize: '14px'}}, 'No deployment history available.')
+                ? h('div', {style: {color: 'var(--ext-muted)', fontSize: '14px'}}, 'No deployment history available.')
                 : h('div', {className: 'application-deployment-history'},
                     history.map((entry, i) => {
                         const isLatest = i === 0;
@@ -252,8 +258,8 @@
                                 h('div', {style: {display: 'flex', alignItems: 'center', justifyContent: 'space-between'}},
                                     h('div', {style: {flex: 1, minWidth: 0}},
                                         h('div', {style: {display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px'}},
-                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#364150', width: '70px', flexShrink: 0}}, 'Commit:'),
-                                            buildCommit && h('span', {style: {fontSize: '14px', fontWeight: 500, color: '#364150'}}, buildCommit),
+                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-strong)', width: '70px', flexShrink: 0}}, 'Commit:'),
+                                            buildCommit && h('span', {style: {fontSize: '14px', fontWeight: 500, color: 'var(--ext-strong)'}}, buildCommit),
                                             isLatest && h('span', {
                                                 style: {
                                                     fontSize: '10px',
@@ -268,8 +274,8 @@
                                             }, 'current')
                                         ),
                                         h('div', {style: {display: 'flex', alignItems: 'center', gap: '6px'}},
-                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#364150', width: '70px', flexShrink: 0}}, 'User:'),
-                                            slackUser && h('span', {style: {fontSize: '14px', fontWeight: 500, color: '#364150'}}, slackUser)
+                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-strong)', width: '70px', flexShrink: 0}}, 'User:'),
+                                            slackUser && h('span', {style: {fontSize: '14px', fontWeight: 500, color: 'var(--ext-strong)'}}, slackUser)
                                         )
                                     ),
                                     h('button', {

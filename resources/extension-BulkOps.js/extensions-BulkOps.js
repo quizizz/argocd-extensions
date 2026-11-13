@@ -1,14 +1,19 @@
 ((window) => {
     const h = React.createElement;
+    if (!document.getElementById('ext-theme-vars')) {
+        const themeStyle = document.createElement('style');
+        themeStyle.id = 'ext-theme-vars';
+        themeStyle.textContent = ':root{--ext-surface:#fff;--ext-surface-2:#f8fbfb;--ext-border:#eff3f5;--ext-border-strong:#dee6eb;--ext-text:#363c4a;--ext-strong:#364150;--ext-muted:#6d7f8b;--ext-selected:#e6f7fc;--ext-shadow:rgba(0,0,0,0.1);--ext-hover:rgba(0,0,0,0.08);--ext-active:rgba(0,0,0,0.15)}.theme-dark{--ext-surface:#303237;--ext-surface-2:#28292a;--ext-border:#495763;--ext-border-strong:#6d7f8b;--ext-text:#fff;--ext-strong:#dee6eb;--ext-muted:#a5b5c0;--ext-selected:#004c67;--ext-shadow:rgba(0,0,0,0.5);--ext-hover:rgba(255,255,255,0.08);--ext-active:rgba(255,255,255,0.15)}';
+        document.head.appendChild(themeStyle);
+    }
     const CONCURRENCY = 5;
     const NO_BRANCH = '__none__';
     const OP_POLL_MS = 3000;
     const OP_TIMEOUT_MS = 10 * 60 * 1000;
-    const SECTION_FIELDS = [
-        'items.metadata.name', 'items.metadata.namespace', 'items.metadata.labels', 'items.metadata.ownerReferences',
-        'items.spec', 'items.status.sync.status', 'items.status.health.status', 'items.status.history', 'items.status.operationState'
+    const OPERATION_FIELDS = [
+        'items.metadata.name', 'items.metadata.namespace', 'items.metadata.labels',
+        'items.status.operationState.phase', 'items.status.operationState.startedAt', 'items.status.operationState.message'
     ];
-    const OPERATION_FIELDS = ['items.metadata.name', 'items.metadata.namespace', 'items.metadata.labels', 'items.status.operationState'];
     const INDEX_FIELDS = ['items.metadata.name', 'items.metadata.labels', 'items.spec.destination'];
     const SYNC_POLICY_POINTERS = new Set(['/spec', '/spec/syncPolicy', '/spec/syncPolicy/automated']);
     const SYNC_POLICY_JQ = new Set(['.spec', '.spec.syncPolicy', '.spec.syncPolicy.automated']);
@@ -379,10 +384,10 @@
         for (const p of left.values()) await onDone(p, 'error', 'timed out waiting for operation');
     }
 
-    const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
-    const selectStyle = {width: '240px', maxWidth: '100%', height: '34px', padding: '0 36px 0 12px', border: '1px solid #dee6eb', borderRadius: '4px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px #fff", appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', fontSize: '14px', cursor: 'pointer'};
-    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid #eff3f5', fontSize: '13px', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'};
-    const tableStyle = {width: '100%', minWidth: '820px', tableLayout: 'fixed', borderCollapse: 'collapse', background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)'};
+    const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-muted)', marginBottom: '4px'};
+    const selectStyle = {width: '240px', maxWidth: '100%', height: '34px', padding: '0 36px 0 12px', border: '1px solid var(--ext-border-strong)', borderRadius: '4px', background: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%236d7f8b' stroke-width='1.6'/></svg>\") no-repeat right 12px center / 12px 8px var(--ext-surface)", color: 'var(--ext-text)', appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none', fontSize: '14px', cursor: 'pointer'};
+    const cellStyle = {padding: '8px 12px', borderBottom: '1px solid var(--ext-border)', fontSize: '13px', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'};
+    const tableStyle = {width: '100%', minWidth: '820px', tableLayout: 'fixed', borderCollapse: 'collapse', background: 'var(--ext-surface)', color: 'var(--ext-text)', borderRadius: '4px', boxShadow: '1px 2px 3px var(--ext-shadow)'};
     const buttonStyle = {whiteSpace: 'nowrap', flexShrink: 0};
     const sectionTitleStyle = {...labelStyle, fontSize: '13px', margin: '28px 0 8px'};
     const linkProps = href => ({href, target: '_blank', rel: 'noopener noreferrer'});
@@ -414,7 +419,7 @@
                 h('div', {className: 'row popup-container__body'},
                     h('div', {className: 'columns large-12 popup-container__body__hasNoIcon', style: {fontSize: '14px'}},
                         lines.map((l, i) => h('p', {key: i}, l)),
-                        h('div', {style: {maxHeight: '220px', overflowY: 'auto', background: '#f8fbfb', border: '1px solid #eff3f5', borderRadius: '4px', padding: '8px 12px', margin: '8px 0', fontFamily: 'monospace', fontSize: '12px'}},
+                        h('div', {style: {maxHeight: '220px', overflowY: 'auto', background: 'var(--ext-surface-2)', border: '1px solid var(--ext-border)', borderRadius: '4px', padding: '8px 12px', margin: '8px 0', fontFamily: 'monospace', fontSize: '12px'}},
                             apps.map(a => h('div', {key: a}, a))
                         ),
                         requireText && h('div', null,
@@ -433,7 +438,7 @@
         );
     };
 
-    const mutedStyle = {color: '#6d7f8b', fontSize: '13px'};
+    const mutedStyle = {color: 'var(--ext-muted)', fontSize: '13px'};
     const monoCell = {...cellStyle, fontFamily: 'monospace'};
     const stopPropagation = e => e.stopPropagation();
 
@@ -458,7 +463,7 @@
         const isCurrent = target.current.size === total;
         const search = githubCommitSearch(target.configRepo, target.commit);
         const pick = () => !busy && onPick(selected ? '' : target.commit);
-        return h('tr', {onClick: pick, style: {cursor: busy ? 'default' : 'pointer', background: selected ? '#e6f7fc' : undefined}},
+        return h('tr', {onClick: pick, style: {cursor: busy ? 'default' : 'pointer', background: selected ? 'var(--ext-selected)' : undefined}},
             h('td', {style: cellStyle}, h('input', {type: 'radio', checked: selected, disabled: busy, onChange: pick, onClick: stopPropagation, style: {margin: 0}})),
             h('td', {style: monoCell, title: target.commit},
                 search ? h('a', {...linkProps(search), onClick: stopPropagation}, shortSha(target.commit)) : shortSha(target.commit),
@@ -502,7 +507,7 @@
         const loadId = React.useRef(0);
         const namespace = nsOfKey(scopeKey);
 
-        const fetchApps = async () => (await listBranchApps(branch, SECTION_FIELDS))
+        const fetchApps = async () => (await listBranchApps(branch))
             .filter(a => nsKey(a) === scopeKey)
             .sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
 
@@ -675,7 +680,7 @@
         };
 
         const appsView = () => {
-            if (loading && apps.length === 0) return h('div', {style: {color: '#6d7f8b'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...');
+            if (loading && apps.length === 0) return h('div', {style: {color: 'var(--ext-muted)'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...');
             if (apps.length === 0) return !error && h('div', {style: mutedStyle}, 'No applications.');
             return h('div', null,
                 h(AppStatusTable, {apps, histories, resolving, results}),
@@ -694,7 +699,7 @@
                 h('div', {style: {display: 'flex', gap: '12px', alignItems: 'center'}},
                     h('button', {className: 'argo-button argo-button--base', style: buttonStyle, disabled: noApps, onClick: onSyncAll},
                         h('i', {className: 'fa fa-sync'}), ' Sync all'),
-                    h('label', {style: {fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap', margin: 0}},
+                    h('label', {style: {fontSize: '13px', color: 'var(--ext-text)', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap', margin: 0}},
                         h('input', {type: 'checkbox', checked: enableAutoSync, onChange: e => setEnableAutoSync(e.target.checked), style: {margin: 0}}),
                         'Re-enable auto-sync')
                 ),
@@ -710,14 +715,14 @@
     };
 
     const BranchAccordion = ({scopeKey, branch, count, open, busy, onToggle, onBusy}) =>
-        h('div', {style: {background: '#fff', borderRadius: '4px', boxShadow: '1px 2px 3px rgba(0,0,0,0.1)', marginBottom: '12px'}},
+        h('div', {style: {background: 'var(--ext-surface)', color: 'var(--ext-text)', borderRadius: '4px', boxShadow: '1px 2px 3px var(--ext-shadow)', marginBottom: '12px'}},
             h('div', {onClick: () => onToggle(branch), style: {display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', cursor: 'pointer', userSelect: 'none'}},
-                h('i', {className: `fa fa-fw fa-chevron-${open ? 'down' : 'right'}`, style: {color: '#6d7f8b'}}),
+                h('i', {className: `fa fa-fw fa-chevron-${open ? 'down' : 'right'}`, style: {color: 'var(--ext-muted)'}}),
                 h('strong', null, branchLabel(branch)),
                 h('span', {style: mutedStyle}, `${count} app${count === 1 ? '' : 's'}`),
                 busy && h('i', {className: 'fa fa-spinner fa-spin', style: {color: '#0dadea'}})
             ),
-            open !== undefined && h('div', {style: {display: open ? 'block' : 'none', padding: '16px', borderTop: '1px solid #eff3f5', background: '#f8fbfb'}},
+            open !== undefined && h('div', {style: {display: open ? 'block' : 'none', padding: '16px', borderTop: '1px solid var(--ext-border)', background: 'var(--ext-surface-2)'}},
                 h(BranchSection, {scopeKey, branch, onBusy}))
         );
 
