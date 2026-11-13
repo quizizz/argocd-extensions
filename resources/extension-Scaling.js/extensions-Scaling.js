@@ -50,7 +50,6 @@
 
     async function getLive(app, node) {
         const params = new URLSearchParams({
-            name: node.name,
             appNamespace: app.metadata.namespace,
             namespace: node.namespace || '',
             resourceName: node.name,
@@ -429,10 +428,12 @@
     const clusterOfKey = key => key.slice(0, key.lastIndexOf('|'));
     const scopeFromParams = (index, params) => {
         const ns = params.get('namespace');
-        if (!ns) return '';
+        if (!ns) return {scope: '', notice: ''};
         const cluster = params.get('cluster');
         const keys = Object.keys(index).filter(k => k.slice(k.lastIndexOf('|') + 1) === ns);
-        return keys.find(k => (cluster ? clusterOfKey(k) === cluster : IN_CLUSTER.has(clusterOfKey(k)))) || keys[0] || '';
+        const scope = keys.find(k => (cluster ? clusterOfKey(k) === cluster : IN_CLUSTER.has(clusterOfKey(k)))) || (!cluster && keys.length === 1 ? keys[0] : '');
+        if (scope) return {scope, notice: ''};
+        return {scope: '', notice: !cluster && keys.length > 1 ? `Namespace ${ns} exists on ${keys.length} clusters, pick one.` : `Namespace ${ns}${cluster ? ` on cluster ${cluster}` : ''} not found.`};
     };
     const scopeParams = key => ({
         namespace: key ? key.slice(key.lastIndexOf('|') + 1) : '',
@@ -474,6 +475,7 @@
         const [summaries, setSummaries] = React.useState({});
         const [loading, setLoading] = React.useState(false);
         const [onlyCapped, setOnlyCapped] = React.useState(false);
+        const [notice, setNotice] = React.useState('');
         const loadId = React.useRef(0);
 
         React.useEffect(() => {
@@ -487,18 +489,20 @@
                     idx[key][br] = (idx[key][br] || 0) + 1;
                 });
                 const params = readParams();
-                const scope = scopeFromParams(idx, params);
+                const {scope, notice: scopeNotice} = scopeFromParams(idx, params);
                 const br = params.get('branch');
+                const branchOk = !br || (scope && br !== '-' && idx[scope][br]);
                 setIndex(idx);
                 setNamespace(scope);
-                setBranch(scope && br && br !== '-' && idx[scope][br] ? br : ALL_BRANCHES);
+                setBranch(scope && br && branchOk ? br : ALL_BRANCHES);
+                setNotice(scopeNotice || (scope && !branchOk ? `Branch ${br} not found in ${nsKeyLabel(scope)}.` : ''));
                 setOnlyCapped(!!scope && params.get('capped') === '1');
             }).catch(e => setIndexError(e.message));
         }, []);
 
         React.useEffect(() => {
-            if (index) writeParams({...scopeParams(namespace), branch: branch === ALL_BRANCHES ? '' : branch, capped: onlyCapped ? '1' : ''});
-        }, [index, namespace, branch, onlyCapped]);
+            if (index && !notice) writeParams({...scopeParams(namespace), branch: branch === ALL_BRANCHES ? '' : branch, capped: onlyCapped ? '1' : ''});
+        }, [index, namespace, branch, onlyCapped, notice]);
 
         const load = async (key, br) => {
             const id = ++loadId.current;
@@ -535,24 +539,25 @@
         const listFor = app => summaries[appKey(app)];
         const rows = apps
             .filter(a => !onlyCapped || (listFor(a) || []).some(isAtMax))
-            .sort((a, b) => appRatio(listFor(b)) - appRatio(listFor(a)) || a.metadata.name.localeCompare(b.metadata.name));
+            .sort((a, b) => (loading ? 0 : appRatio(listFor(b)) - appRatio(listFor(a))) || a.metadata.name.localeCompare(b.metadata.name));
         const cappedCount = Object.values(summaries).filter(list => list.some(isAtMax)).length;
         const namespaces = index ? Object.keys(index).sort((a, b) => nsKeyLabel(a).localeCompare(nsKeyLabel(b))) : [];
         const branches = index && namespace ? Object.keys(index[namespace] || {}).sort() : [];
 
         return h('div', {style: {padding: '24px', maxWidth: '1600px'}},
             (indexError || error) && h('div', {style: {color: '#e96d76', marginBottom: '12px'}}, indexError || error),
+            notice && h('div', {style: {color: 'var(--ext-muted)', marginBottom: '12px'}}, h('i', {className: 'fa fa-exclamation-triangle'}), ` ${notice}`),
             h('div', {style: {display: 'flex', gap: '24px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap'}},
                 h('div', null,
                     h('div', {style: labelStyle}, 'Namespace'),
-                    h('select', {style: selectStyle, value: namespace, disabled: !index, onChange: e => { setNamespace(e.target.value); setBranch(ALL_BRANCHES); }},
+                    h('select', {style: selectStyle, value: namespace, disabled: !index, onChange: e => { setNotice(''); setNamespace(e.target.value); setBranch(ALL_BRANCHES); }},
                         h('option', {value: ''}, index ? 'Select namespace' : 'Loading...'),
                         namespaces.map(key => h('option', {key, value: key}, nsKeyLabel(key)))
                     )
                 ),
                 h('div', null,
                     h('div', {style: labelStyle}, 'Branch'),
-                    h('select', {style: selectStyle, value: branch, disabled: !namespace, onChange: e => setBranch(e.target.value)},
+                    h('select', {style: selectStyle, value: branch, disabled: !namespace, onChange: e => { setNotice(''); setBranch(e.target.value); }},
                         h('option', {value: ALL_BRANCHES}, 'All branches'),
                         branches.filter(br => br !== '-').map(br => h('option', {key: br, value: br}, `${br} (${index[namespace][br]})`))
                     )
@@ -560,10 +565,13 @@
                 h('button', {className: 'argo-button argo-button--base-o', disabled: !namespace || loading, onClick: () => load(namespace, branch)},
                     h('i', {className: loading ? 'fa fa-spinner fa-spin' : 'fa fa-redo'}), ' Refresh'),
                 namespace && h('label', {style: {fontSize: '13px', color: 'var(--ext-text)', display: 'flex', alignItems: 'center', gap: '6px'}},
-                    h('input', {type: 'checkbox', checked: onlyCapped, onChange: e => setOnlyCapped(e.target.checked)}),
+                    h('input', {type: 'checkbox', checked: onlyCapped, onChange: e => { setNotice(''); setOnlyCapped(e.target.checked); }}),
                     `Only at max (${cappedCount})`)
             ),
+            index && !namespace && h('div', {style: {color: 'var(--ext-muted)'}}, 'Select a namespace to see its scaling.'),
             namespace && apps.length === 0 && loading && h('div', {style: {color: 'var(--ext-muted)'}}, h('i', {className: 'fa fa-spinner fa-spin'}), ' Loading applications...'),
+            namespace && apps.length === 0 && !loading && !error && h('div', {style: {color: 'var(--ext-muted)'}}, 'No applications found.'),
+            namespace && apps.length > 0 && rows.length === 0 && onlyCapped && h('div', {style: {color: 'var(--ext-muted)'}}, loading ? 'Loading scaling data...' : 'No applications at max.'),
             rows.length > 0 && h('table', {style: tableStyle},
                 h('thead', null, h('tr', null,
                     ['Application', 'Branch', 'Min', 'Current', 'Desired', 'Max', 'Usage', 'Triggers (current / target)', 'Cron windows', 'State'].map(c =>
