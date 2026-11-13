@@ -1,7 +1,7 @@
 ((window) => {
     const h = React.createElement;
     const CONCURRENCY = 5;
-    const AUTO_SYNC_POLICY = {prune: true};
+    const FALLBACK_AUTO_SYNC_POLICY = {prune: false};
 
     async function apiRequest(method, path, body) {
         const resp = await fetch(path, {
@@ -122,12 +122,28 @@
         return meta ? meta.commit : null;
     }
 
+    const appSetPolicyCache = {};
+
+    async function desiredAutoSyncPolicy(app) {
+        const owner = (app.metadata.ownerReferences || []).find(o => o.kind === 'ApplicationSet');
+        if (!owner) return FALLBACK_AUTO_SYNC_POLICY;
+        if (!appSetPolicyCache[owner.name]) {
+            appSetPolicyCache[owner.name] = apiRequest('GET', `/api/v1/applicationsets/${encodeURIComponent(owner.name)}?appsetNamespace=${encodeURIComponent(app.metadata.namespace)}`)
+                .then(set => {
+                    const policy = set.spec && set.spec.template && set.spec.template.spec && set.spec.template.spec.syncPolicy;
+                    return (policy && policy.automated) || FALLBACK_AUTO_SYNC_POLICY;
+                })
+                .catch(() => FALLBACK_AUTO_SYNC_POLICY);
+        }
+        return appSetPolicyCache[owner.name];
+    }
+
     async function setAutoSync(name, enabled) {
         const fresh = await apiRequest('GET', appPath(name));
         const has = isAutoSync(fresh);
         if (has === enabled) return;
         fresh.spec.syncPolicy = fresh.spec.syncPolicy || {};
-        fresh.spec.syncPolicy.automated = enabled ? AUTO_SYNC_POLICY : null;
+        fresh.spec.syncPolicy.automated = enabled ? await desiredAutoSyncPolicy(fresh) : null;
         await apiRequest('PUT', appPath(name), fresh);
     }
 
@@ -143,6 +159,43 @@
         } catch (e) {
             if (!(enableAutoSync && /operation is already in progress/i.test(e.message))) throw e;
         }
+    }
+
+    const RESTARTABLE = {'apps/Deployment': true, 'apps/StatefulSet': true, 'apps/DaemonSet': true, 'argoproj.io/Rollout': true};
+    const nodeKey = n => `${n.group || ''}/${n.kind}`;
+
+    async function workloadRefs(app, rollouts) {
+        const refs = new Set();
+        for (const r of rollouts) {
+            const params = new URLSearchParams({
+                name: app.metadata.name, appNamespace: app.metadata.namespace, namespace: r.namespace || '',
+                resourceName: r.name, version: r.version, kind: r.kind, group: r.group
+            });
+            const data = await apiRequest('GET', `${appPath(app.metadata.name)}/resource?${params}`);
+            const manifest = JSON.parse(data.manifest || '{}');
+            const ref = manifest.spec && manifest.spec.workloadRef;
+            if (ref && ref.name) refs.add(`${(ref.apiVersion || '').split('/')[0]}/${ref.kind}/${r.namespace || ''}/${ref.name}`);
+        }
+        return refs;
+    }
+
+    async function restartTargets(app) {
+        const tree = await apiRequest('GET', `${appPath(app.metadata.name)}/resource-tree?appNamespace=${encodeURIComponent(app.metadata.namespace)}`);
+        const nodes = (tree.nodes || []).filter(n => RESTARTABLE[nodeKey(n)] && !(n.parentRefs && n.parentRefs.length));
+        const refs = await workloadRefs(app, nodes.filter(n => n.kind === 'Rollout'));
+        return nodes.filter(n => !refs.has(`${n.group || ''}/${n.kind}/${n.namespace || ''}/${n.name}`));
+    }
+
+    async function restartApp(app) {
+        const targets = await restartTargets(app);
+        if (targets.length === 0) return {status: 'skipped', message: 'no Deployment/Rollout'};
+        for (const n of targets) {
+            await apiRequest('POST', `${appPath(app.metadata.name)}/resource/actions/v2`, {
+                name: app.metadata.name, appNamespace: app.metadata.namespace, namespace: n.namespace || '',
+                resourceName: n.name, version: n.version, kind: n.kind, group: n.group || '', action: 'restart', resourceActionParameters: []
+            });
+        }
+        return {status: 'ok', message: targets.map(n => `${n.kind}/${n.name}`).join(', ')};
     }
 
     const labelStyle = {fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6d7f8b', marginBottom: '4px'};
@@ -249,8 +302,8 @@
             items.forEach(({app}) => setResult(app.metadata.name, 'running', ''));
             await runPool(items, async item => {
                 try {
-                    await fn(item);
-                    setResult(item.app.metadata.name, 'ok', '');
+                    const r = (await fn(item)) || {};
+                    setResult(item.app.metadata.name, r.status || 'ok', r.message || '');
                 } catch (e) {
                     setResult(item.app.metadata.name, 'error', e.message);
                 }
@@ -284,6 +337,17 @@
             apps: apps.map(a => a.metadata.name),
             requireText: isProd ? namespace : null,
             run: () => runBulk(apps.map(app => ({app})), ({app}) => syncApp(app, enableAutoSync))
+        });
+
+        const onRestartAll = () => setConfirm({
+            title: `Restart ${apps.length} application(s)`,
+            lines: [
+                `Namespace ${namespace}, branch ${branch}. Runs the ArgoCD "restart" action on every Deployment, StatefulSet, DaemonSet and Argo Rollout in each app.`,
+                'Deployments do a rolling restart; Rollouts restart pods via spec.restartAt, respecting maxUnavailable. Deployments referenced by a Rollout workloadRef are left alone. No git or image change.'
+            ],
+            apps: apps.map(a => a.metadata.name),
+            requireText: isProd ? namespace : null,
+            run: () => runBulk(apps.map(app => ({app})), ({app}) => restartApp(app))
         });
 
         const onRollbackAll = () => {
@@ -340,6 +404,8 @@
                         h('input', {type: 'checkbox', checked: enableAutoSync, onChange: e => setEnableAutoSync(e.target.checked)}),
                         'Re-enable auto-sync')
                 ),
+                h('button', {className: 'argo-button argo-button--base', disabled: busy || loading || apps.length === 0, onClick: onRestartAll},
+                    h('i', {className: 'fa fa-redo-alt'}), ' Restart all'),
                 h('div', {style: {display: 'flex', gap: '12px', alignItems: 'center'}},
                     h('select', {style: {...selectStyle, minWidth: '360px'}, value: targetCommit, disabled: busy || resolving || targets.length === 0, onChange: e => setTargetCommit(e.target.value)},
                         h('option', {value: ''}, resolving ? 'Resolving build commits...' : 'Select build commit to roll back to'),
