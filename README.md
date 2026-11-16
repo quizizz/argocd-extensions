@@ -9,6 +9,7 @@ Custom UI extensions for ArgoCD.
 | [Rollback](resources/extension-Rollback.js/extensions-Rollback.js) | Adds a Rollback button to the application top bar with a deployment history flyout showing commit, deployer, and one-click rollback |
 | [CommitDetails](resources/extension-CommitDetails.js/extensions-CommitDetails.js) | Replaces the launchpad Author/Comment in SYNC STATUS and LAST SYNC panels with actual service commit SHA and slackUsername from _live_build.yml |
 | [Pinned](resources/extension-Pinned.js/extensions-Pinned.js) | Pinned page: pin namespaces or individual apps for a quick view of their sync, health, branch, auto-sync and last sync. Pins are stored in browser localStorage only |
+| [Scaling](resources/extension-Scaling.js/extensions-Scaling.js) | Read-only Scaling page (per namespace/branch) and a ScaledObject tab showing KEDA min/max/current/desired replicas, trigger metrics vs targets, cron windows, and which apps are capped at max |
 
 ---
 
@@ -53,6 +54,10 @@ tar -cf commit-details.tar resources/extension-CommitDetails.js/
 
 ```bash
 tar -cf pinned.tar resources/extension-Pinned.js/
+### Scaling
+
+```bash
+tar -cf scaling.tar resources/extension-Scaling.js/
 ```
 
 Verify before uploading:
