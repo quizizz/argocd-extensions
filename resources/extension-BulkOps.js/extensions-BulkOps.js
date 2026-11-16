@@ -231,6 +231,46 @@
         return {plan, skipped};
     }
 
+    async function renderedResources(app, entry) {
+        const {revisions} = entrySources(entry);
+        const multi = entry.sources && entry.sources.length > 0;
+        const params = new URLSearchParams({appNamespace: app.metadata.namespace});
+        if (multi) revisions.forEach((r, i) => { params.append('revisions', r); params.append('sourcePositions', String(i + 1)); });
+        else params.set('revision', revisions[0]);
+        const data = await apiRequest('GET', `${appPath(app.metadata.name)}/manifests?${params}`);
+        return new Set((data.manifests || []).map(m => {
+            const o = JSON.parse(m);
+            return `${o.kind}/${o.metadata.name}`;
+        }));
+    }
+
+    async function infraDrift(app, entryId) {
+        const target = historyOf(app).find(e => e.id === entryId);
+        const current = latestEntry(app);
+        if (!target || !current) return '';
+        const [from, to] = await Promise.all([renderedResources(app, current), renderedResources(app, target)]);
+        const added = [...to].filter(r => !from.has(r));
+        const removed = [...from].filter(r => !to.has(r));
+        if (!added.length && !removed.length) return null;
+        const kinds = list => [...new Set(list.map(r => r.split('/')[0]))].join(', ');
+        const change = [added.length && `adds ${kinds(added)}`, removed.length && `removes ${kinds(removed)}`].filter(Boolean).join(', ');
+        return {
+            reason: `older infra (${change}), revert _live_build.yml instead`,
+            detail: `Rolling back re-applies launchpad as of this build, which would change resources:\n${[...added.map(r => `+ ${r}`), ...removed.map(r => `- ${r}`)].join('\n')}`
+        };
+    }
+
+    async function excludeInfraDrift(plan) {
+        const kept = [];
+        const skipped = [];
+        await runPool(plan, async p => {
+            const drift = await infraDrift(p.app, p.entryId).catch(e => ({reason: `could not compare manifests: ${e.message}`}));
+            if (drift) skipped.push({app: p.app, ...drift});
+            else kept.push(p);
+        });
+        return {plan: kept, skipped};
+    }
+
     const appSetOwner = app => (app.metadata.ownerReferences || []).find(o => o.kind === 'ApplicationSet');
 
     const ignoresSyncPolicy = (set, appName) => ((set.spec && set.spec.ignoreApplicationDifferences) || []).some(rule =>
@@ -478,16 +518,17 @@
             h('td', {style: cellStyle}, h(Badge, {text: app.status && app.status.health && app.status.health.status})),
             h('td', {style: cellStyle}, isAutoSync(app) ? 'on' : 'off'),
             h('td', {style: monoCell, title: cur || ''}, resolving ? '...' : shortSha(cur) || '-'),
-            h('td', {style: cellStyle, title: res ? res.message : ''}, res && h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : ''))
+            h('td', {style: cellStyle, title: res ? res.detail || res.message : ''}, res && h('span', null, h(Badge, {text: res.status}), res.message ? ` ${res.message}` : ''))
         );
     }));
 
     const RollbackHistoryRow = ({target, total, selected, busy, onPick}) => {
         const isCurrent = target.current.size === total;
         const search = githubCommitSearch(target.configRepo, target.commit);
-        const pick = () => !busy && onPick(selected ? '' : target.commit);
-        return h('tr', {onClick: pick, style: {cursor: busy ? 'default' : 'pointer', background: selected ? 'var(--ext-selected)' : undefined}},
-            h('td', {style: cellStyle}, h('input', {type: 'radio', checked: selected, disabled: busy, onChange: pick, onClick: stopPropagation, style: {margin: 0}})),
+        const locked = busy || isCurrent;
+        const pick = () => !locked && onPick(selected ? '' : target.commit);
+        return h('tr', {onClick: pick, title: isCurrent ? 'All apps are already on this build' : '', style: {cursor: locked ? 'default' : 'pointer', opacity: isCurrent ? 0.6 : 1, background: selected ? 'var(--ext-selected)' : undefined}},
+            h('td', {style: cellStyle}, h('input', {type: 'radio', checked: selected && !isCurrent, disabled: locked, onChange: pick, onClick: stopPropagation, style: {margin: 0}})),
             h('td', {style: monoCell, title: target.commit},
                 search ? h('a', {...linkProps(search), onClick: stopPropagation}, shortSha(target.commit)) : shortSha(target.commit),
                 isCurrent && h('span', {style: {marginLeft: '6px'}}, h(Badge, {text: 'current'}))),
@@ -568,7 +609,7 @@
             if (onBusy) onBusy(branch, busy);
         }, [busy]);
 
-        const setResult = (key, status, message) => setResults(r => ({...r, [key]: {status, message}}));
+        const setResult = (key, status, message, detail) => setResults(r => ({...r, [key]: {status, message, detail}}));
 
         const runBulk = async (items, fn) => {
             setBusy(true);
@@ -646,7 +687,7 @@
             run: () => runBulk(apps.map(app => ({app})), ({app}) => restartApp(app))
         });
 
-        const applySkipped = skipped => skipped.forEach(({app, reason}) => setResult(appKey(app), 'skipped', reason));
+        const applySkipped = skipped => skipped.forEach(({app, reason, detail}) => setResult(appKey(app), 'skipped', reason, detail));
 
         const appSetWarning = async plan => {
             const appSetPolicy = appSetPolicyLookup();
@@ -664,6 +705,8 @@
             let warning;
             try {
                 fresh = await freshPlan();
+                const drift = await excludeInfraDrift(fresh.plan);
+                fresh = {...fresh, plan: drift.plan, skipped: [...fresh.skipped, ...drift.skipped]};
                 warning = await appSetWarning(fresh.plan);
             } catch (e) {
                 setError(e.message);
@@ -697,6 +740,8 @@
                         setBusy(false);
                         return;
                     }
+                    const drift = await excludeInfraDrift(latest.plan.filter(p => confirmed.has(appKey(p.app))));
+                    latest = {...latest, plan: drift.plan, skipped: [...latest.skipped, ...drift.skipped]};
                     applySkipped(latest.skipped.filter(s => confirmed.has(appKey(s.app))));
                     await runBulk(latest.plan.filter(p => confirmed.has(appKey(p.app))), ({app, entryId}) => rollbackApp(app, entryId));
                 }
