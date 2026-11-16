@@ -10,6 +10,12 @@
  */
 ((window) => {
     const h = React.createElement;
+    if (!document.getElementById('ext-theme-vars')) {
+        const themeStyle = document.createElement('style');
+        themeStyle.id = 'ext-theme-vars';
+        themeStyle.textContent = ':root{--ext-surface:#fff;--ext-surface-2:#f8fbfb;--ext-border:#eff3f5;--ext-border-strong:#dee6eb;--ext-text:#363c4a;--ext-strong:#364150;--ext-muted:#6d7f8b;--ext-selected:#e6f7fc;--ext-shadow:rgba(0,0,0,0.1);--ext-hover:rgba(0,0,0,0.08);--ext-active:rgba(0,0,0,0.15)}.theme-dark{--ext-surface:#303237;--ext-surface-2:#28292a;--ext-border:#495763;--ext-border-strong:#6d7f8b;--ext-text:#fff;--ext-strong:#dee6eb;--ext-muted:#a5b5c0;--ext-selected:#004c67;--ext-shadow:rgba(0,0,0,0.5);--ext-hover:rgba(255,255,255,0.08);--ext-active:rgba(255,255,255,0.15)}';
+        document.head.appendChild(themeStyle);
+    }
 
     // Returns the full commit SHA string for a history entry.
     // Handles both single-source (entry.revision) and multi-source (entry.revisions[]).
@@ -38,34 +44,53 @@
         return resp.json().catch(() => ({}));
     }
 
-    // Disables auto-sync by PUTting the updated application spec, then calls rollback.
-    // The rollback API rejects with FailedPrecondition if auto-sync is still enabled.
+    const metaKey = (application, id) => `${application.metadata.namespace}/${application.metadata.name}#${id}`;
+    const buildMeta = (application, id) => buildCommitCache[metaKey(application, id)];
+
     async function callRollback(application, id) {
         const appName = application.metadata.name;
         const appNamespace = application.metadata.namespace;
+        const appUrl = `/api/v1/applications/${encodeURIComponent(appName)}`;
+        const automatedOf = app => (app && app.spec.syncPolicy && app.spec.syncPolicy.automated) || null;
+        const fetchApp = () => apiRequest('GET', `${appUrl}?appNamespace=${encodeURIComponent(appNamespace)}`);
+        const patchAutomated = automated => apiRequest('PATCH', appUrl, {
+            name: appName, appNamespace, patchType: 'merge', patch: JSON.stringify({spec: {syncPolicy: {automated}}})
+        });
+        const post = () => apiRequest('POST', `${appUrl}/rollback`, {id, appNamespace});
 
-        if (application.spec.syncPolicy && application.spec.syncPolicy.automated) {
-            const update = JSON.parse(JSON.stringify(application));
-            update.spec.syncPolicy.automated = null;
-            await apiRequest('PUT', `/api/v1/applications/${encodeURIComponent(appName)}`, update);
+        const previous = automatedOf(await fetchApp());
+        if (previous) await patchAutomated(null);
+        try {
+            try {
+                await post();
+            } catch (e) {
+                if (!(previous && /auto-sync|automated/i.test(e.message))) throw e;
+                await new Promise(r => setTimeout(r, 2000));
+                await post();
+            }
+        } catch (e) {
+            if (previous) {
+                const fresh = await fetchApp().catch(() => null);
+                if (fresh && !automatedOf(fresh)) await patchAutomated(previous).catch(() => {});
+            }
+            throw e;
         }
-
-        await apiRequest('POST', `/api/v1/applications/${encodeURIComponent(appName)}/rollback`, {id, appNamespace});
     }
 
     // Confirmation modal — reuses ArgoCD's popup CSS classes for identical look
-    const ConfirmModal = ({appName, entry, autoSync, isLatest, onConfirm, onCancel}) => {
+    const ConfirmModal = ({application, appName, entry, autoSync, isLatest, onConfirm, onCancel}) => {
         const [closeHover, setCloseHover] = React.useState(false);
         const [closeActive, setCloseActive] = React.useState(false);
         const title = h('strong', null, isLatest ? 'Redeploy application' : 'Rollback application');
         const boldName = h('strong', null, appName);
-        const boldCommit = h('strong', null, fullRev(entry));
+        const meta = buildMeta(application, entry.id);
+        const boldCommit = h('strong', null, (meta && meta.commit) || fullRev(entry));
         const baseMessage = isLatest
             ? h('p', null, `Are you sure you want to redeploy application `, boldName, ` to commit `, boldCommit, '?')
             : h('p', null, `Are you sure you want to rollback application `, boldName, ` to commit `, boldCommit, '?');
         const message = h('div', null,
             baseMessage,
-            !isLatest && autoSync && h('p', {style: {color: '#6d7f8b', marginTop: '4px'}}, 'Note: Auto-Sync will be disabled.')
+            !isLatest && autoSync && h('p', {style: {color: 'var(--ext-muted)', marginTop: '4px'}}, 'Note: Auto-Sync will be disabled.')
         );
 
         return h(
@@ -89,7 +114,7 @@
                             width: '28px',
                             height: '28px',
                             borderRadius: '50%',
-                            background: closeActive ? 'rgba(0,0,0,0.15)' : closeHover ? 'rgba(0,0,0,0.08)' : 'transparent',
+                            background: closeActive ? 'var(--ext-active)' : closeHover ? 'var(--ext-hover)' : 'transparent',
                             transition: 'background 0.15s',
                             position: 'absolute',
                             right: '12px',
@@ -158,7 +183,6 @@
         React.useEffect(() => {
             prefetchBuildCommits(application).then(() => setMetaLoading(false));
         }, []);
-        const revMeta = buildCommitCache;
 
         const showSnackbar = (message, type) => {
             setSnackbar({message, type});
@@ -189,6 +213,7 @@
             {style: {padding: '20px'}},
 
             confirmEntry && h(ConfirmModal, {
+                application,
                 appName,
                 entry: confirmEntry,
                 autoSync,
@@ -220,20 +245,20 @@
             snackbar && h(Snackbar, {message: snackbar.message, type: snackbar.type, onClose: () => setSnackbar(null)}),
 
             metaLoading
-                ? h('div', {style: {height: 'calc(100vh - 160px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', color: '#6d7f8b'}},
+                ? h('div', {style: {height: 'calc(100vh - 160px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', color: 'var(--ext-muted)'}},
                     h('i', {className: 'fa fa-spinner fa-spin', style: {fontSize: '24px'}}),
                     h('span', {style: {fontSize: '13px'}}, 'Loading deployment history...')
                   )
             : history.length === 0
-                ? h('div', {style: {color: '#888', fontSize: '14px'}}, 'No deployment history available.')
+                ? h('div', {style: {color: 'var(--ext-muted)', fontSize: '14px'}}, 'No deployment history available.')
                 : h('div', {className: 'application-deployment-history'},
                     history.map((entry, i) => {
                         const isLatest = i === 0;
                         const rev = fullRev(entry);
                         const isRolling = rolling === entry.id;
 
-                        const meta = revMeta[entry.id];
-                        const buildCommit = meta && meta.commit;
+                        const meta = buildMeta(application, entry.id);
+                        const buildCommit = (meta && meta.commit) || rev;
                         const slackUser = meta && meta.slackUsername;
 
                         return h('div', {key: entry.id, className: 'row application-deployment-history__item'},
@@ -250,8 +275,8 @@
                                 h('div', {style: {display: 'flex', alignItems: 'center', justifyContent: 'space-between'}},
                                     h('div', {style: {flex: 1, minWidth: 0}},
                                         h('div', {style: {display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px'}},
-                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#364150', width: '70px', flexShrink: 0}}, 'Commit:'),
-                                            buildCommit && h('span', {style: {fontSize: '14px', fontWeight: 500, color: '#364150'}}, buildCommit),
+                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-strong)', width: '70px', flexShrink: 0}}, 'Commit:'),
+                                            buildCommit && h('span', {style: {fontSize: '14px', fontWeight: 500, color: 'var(--ext-strong)'}}, buildCommit),
                                             isLatest && h('span', {
                                                 style: {
                                                     fontSize: '10px',
@@ -266,8 +291,8 @@
                                             }, 'current')
                                         ),
                                         h('div', {style: {display: 'flex', alignItems: 'center', gap: '6px'}},
-                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#364150', width: '70px', flexShrink: 0}}, 'User:'),
-                                            slackUser && h('span', {style: {fontSize: '14px', fontWeight: 500, color: '#364150'}}, slackUser)
+                                            h('span', {style: {fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ext-strong)', width: '70px', flexShrink: 0}}, 'User:'),
+                                            slackUser && h('span', {style: {fontSize: '14px', fontWeight: 500, color: 'var(--ext-strong)'}}, slackUser)
                                         )
                                     ),
                                     h('button', {
@@ -284,15 +309,12 @@
         );
     };
 
-    // Module-level cache: pre-read build.commit and build.slackUsername keyed by entry.id.
-    // Populated by ToolbarButton (always mounted) so data is ready when flyout opens.
     const buildCommitCache = {};
 
-    // Fetches build.commit for all history entries via appdetails API (parallel, deduplicated by revision).
     async function prefetchBuildCommits(application) {
         const appName = application.metadata.name;
         const history = (application.status.history || []).slice();
-        const uncached = history.filter(e => buildCommitCache[e.id] === undefined);
+        const uncached = history.filter(e => buildMeta(application, e.id) === undefined);
         if (uncached.length === 0) return;
 
         // Deduplicate by first revision — same revision means same values, no need to call twice.
@@ -318,6 +340,7 @@
             const key = isMultiSrcKey || entry.id;
             const ids = seen[key] || [entry.id];
 
+            let failed = false;
             for (let i = 0; i < sources.length; i++) {
                 const source = sources[i];
                 if (!source || !source.repoURL) continue;
@@ -330,12 +353,14 @@
                     const commit = params && params.find(p => p.name === 'build.commit');
                     const slack = params && params.find(p => p.name === 'build.slackUsername');
                     if (commit) {
-                        ids.forEach(id => { buildCommitCache[id] = {commit: commit.value, slackUsername: slack ? slack.value : null}; });
+                        ids.forEach(id => { buildCommitCache[metaKey(application, id)] = {commit: commit.value, slackUsername: slack ? slack.value : null}; });
                         return;
                     }
-                } catch (_) {}
+                } catch (_) {
+                    failed = true;
+                }
             }
-            ids.forEach(id => { buildCommitCache[id] = null; }); // not found
+            if (!failed) ids.forEach(id => { buildCommitCache[metaKey(application, id)] = null; });
         }));
     }
 
